@@ -44,7 +44,7 @@ describe('getDueHabits', () => {
 
   it('excludes weekly habit already logged this week', () => {
     const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' })
-    logHabit(db, 1, h.id, '2026-06-10') // normalizes to Mon Jun 8
+    logHabit(db, 1, h.id, '2026-06-10') // a log this week (week of Jun 8)
     expect(getDueHabits(db, 1, '2026-06-12')).toHaveLength(0)
   })
 

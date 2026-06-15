@@ -7,6 +7,7 @@ export interface HabitLog {
   user_id:    number
   log_date:   string
   notes:      string
+  rating:     number | null
   created_at: string
 }
 
@@ -18,8 +19,10 @@ export function getMondayOf(dateStr: string): string {
   return d.toISOString().slice(0, 10)
 }
 
-function canonicalDate(habit: Pick<Habit, 'frequency'>, date: string): string {
-  return habit.frequency === 'weekly' ? getMondayOf(date) : date
+function addDays(dateStr: string, n: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
 }
 
 export function logHabit(
@@ -28,17 +31,20 @@ export function logHabit(
   habitId: number,
   date:    string,
   notes:   string = '',
+  rating?: number,
 ): HabitLog {
   const habit = db.prepare('SELECT * FROM habits_habits WHERE id = ? AND user_id = ?').get(habitId, userId) as Habit | undefined
   if (!habit) throw new Error(`Habit ${habitId} not found`)
 
-  const logDate = canonicalDate(habit, date)
+  if (rating !== undefined && (rating < 1 || rating > 5 || !Number.isInteger(rating))) {
+    throw new Error('rating must be an integer between 1 and 5')
+  }
 
   try {
     const result = db.prepare(`
-      INSERT INTO habits_logs (habit_id, user_id, log_date, notes)
-      VALUES (?, ?, ?, ?)
-    `).run(habitId, userId, logDate, notes)
+      INSERT INTO habits_logs (habit_id, user_id, log_date, notes, rating)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(habitId, userId, date, notes, rating ?? null)
     return db.prepare('SELECT * FROM habits_logs WHERE id = ?').get(result.lastInsertRowid) as HabitLog
   } catch (err: any) {
     if (err?.message?.includes('UNIQUE')) throw new Error(`Habit already logged for this period`)
@@ -55,12 +61,48 @@ export function unlogHabit(
   const habit = db.prepare('SELECT * FROM habits_habits WHERE id = ? AND user_id = ?').get(habitId, userId) as Habit | undefined
   if (!habit) throw new Error(`Habit ${habitId} not found`)
 
-  const logDate = canonicalDate(habit, date)
   const result = db.prepare(
     'DELETE FROM habits_logs WHERE habit_id = ? AND user_id = ? AND log_date = ?'
-  ).run(habitId, userId, logDate)
+  ).run(habitId, userId, date)
 
-  if (result.changes === 0) throw new Error(`Log not found for ${logDate}`)
+  if (result.changes === 0) throw new Error(`Log not found for ${date}`)
+}
+
+export function updateLog(
+  db:      Database,
+  userId:  number,
+  habitId: number,
+  date:    string,
+  input:   { notes?: string; rating?: number | null },
+): HabitLog {
+  const habit = db.prepare('SELECT * FROM habits_habits WHERE id = ? AND user_id = ?').get(habitId, userId) as Habit | undefined
+  if (!habit) throw new Error(`Habit ${habitId} not found`)
+
+  if (input.rating !== undefined && input.rating !== null) {
+    if (input.rating < 1 || input.rating > 5 || !Number.isInteger(input.rating)) {
+      throw new Error('rating must be an integer between 1 and 5')
+    }
+  }
+
+  const log = db.prepare(
+    'SELECT * FROM habits_logs WHERE habit_id = ? AND user_id = ? AND log_date = ?'
+  ).get(habitId, userId, date) as HabitLog | undefined
+  if (!log) throw new Error(`Log not found for ${date}`)
+
+  db.prepare(`
+    UPDATE habits_logs SET
+      notes  = COALESCE(?, notes),
+      rating = ?
+    WHERE habit_id = ? AND user_id = ? AND log_date = ?
+  `).run(
+    input.notes  !== undefined ? input.notes  : null,
+    input.rating !== undefined ? input.rating : log.rating,
+    habitId,
+    userId,
+    date,
+  )
+
+  return db.prepare('SELECT * FROM habits_logs WHERE habit_id = ? AND user_id = ? AND log_date = ?').get(habitId, userId, date) as HabitLog
 }
 
 export function getLogs(
@@ -77,9 +119,18 @@ export function getLogs(
 }
 
 export function isLoggedToday(db: Database, habit: Habit, today: string): boolean {
-  const checkDate = canonicalDate(habit, today)
   const row = db.prepare(
     'SELECT id FROM habits_logs WHERE habit_id = ? AND log_date = ?'
-  ).get(habit.id, checkDate)
+  ).get(habit.id, today)
   return !!row
+}
+
+export function isWeekComplete(db: Database, habit: Habit, today: string): boolean {
+  if (habit.frequency !== 'weekly') return false
+  const weekStart = getMondayOf(today)
+  const weekEnd   = addDays(weekStart, 6)
+  const count = (db.prepare(
+    'SELECT COUNT(*) AS n FROM habits_logs WHERE habit_id = ? AND log_date >= ? AND log_date <= ?'
+  ).get(habit.id, weekStart, weekEnd) as { n: number }).n
+  return count >= habit.target_count
 }

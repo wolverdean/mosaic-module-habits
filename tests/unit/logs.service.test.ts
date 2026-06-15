@@ -5,8 +5,10 @@ import { createHabit } from '../../src/services/habits.service.js'
 import {
   logHabit,
   unlogHabit,
+  updateLog,
   getLogs,
   isLoggedToday,
+  isWeekComplete,
   getMondayOf,
 } from '../../src/services/logs.service.js'
 
@@ -62,16 +64,24 @@ describe('logHabit — daily', () => {
 })
 
 describe('logHabit — weekly', () => {
-  it('normalizes log_date to the Monday of the week', () => {
+  it('stores the actual date (no Monday normalization)', () => {
     const h = createHabit(db, 1, { name: 'Long run', frequency: 'weekly' })
     const log = logHabit(db, 1, h.id, '2026-06-10') // Wednesday
-    expect(log.log_date).toBe('2026-06-08')          // Monday
+    expect(log.log_date).toBe('2026-06-10')
   })
 
-  it('throws 409 when same week already logged', () => {
+  it('allows multiple logs in the same week (for target_count > 1)', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly', target_count: 3 })
+    logHabit(db, 1, h.id, '2026-06-08') // Mon
+    logHabit(db, 1, h.id, '2026-06-10') // Wed
+    logHabit(db, 1, h.id, '2026-06-12') // Fri
+    expect(getLogs(db, 1, h.id, '2026-06')).toHaveLength(3)
+  })
+
+  it('throws 409 on duplicate log for the same day', () => {
     const h = createHabit(db, 1, { name: 'Long run', frequency: 'weekly' })
-    logHabit(db, 1, h.id, '2026-06-10') // Wednesday
-    expect(() => logHabit(db, 1, h.id, '2026-06-11')).toThrow('already logged') // Thursday same week
+    logHabit(db, 1, h.id, '2026-06-10')
+    expect(() => logHabit(db, 1, h.id, '2026-06-10')).toThrow('already logged')
   })
 
   it('allows logging different weeks', () => {
@@ -95,11 +105,99 @@ describe('unlogHabit', () => {
     expect(() => unlogHabit(db, 1, h.id, '2026-06-10')).toThrow('not found')
   })
 
-  it('normalizes date for weekly habits', () => {
+  it('removes a weekly log by its actual date', () => {
     const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' })
-    logHabit(db, 1, h.id, '2026-06-10')             // stored as 2026-06-08
-    unlogHabit(db, 1, h.id, '2026-06-11')            // Wednesday of same week
+    logHabit(db, 1, h.id, '2026-06-10')             // stored as actual date
+    unlogHabit(db, 1, h.id, '2026-06-10')
     expect(getLogs(db, 1, h.id, '2026-06')).toHaveLength(0)
+  })
+})
+
+describe('updateLog', () => {
+  it('updates notes on an existing log', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10', 'first note')
+    const updated = updateLog(db, 1, h.id, '2026-06-10', { notes: 'revised note' })
+    expect(updated.notes).toBe('revised note')
+  })
+
+  it('updates rating on an existing log', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10')
+    const updated = updateLog(db, 1, h.id, '2026-06-10', { rating: 4 })
+    expect(updated.rating).toBe(4)
+  })
+
+  it('clears rating when set to null', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10', '', 5)
+    const updated = updateLog(db, 1, h.id, '2026-06-10', { rating: null })
+    expect(updated.rating).toBeNull()
+  })
+
+  it('throws 404 when log does not exist', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    expect(() => updateLog(db, 1, h.id, '2026-06-10', { notes: 'x' })).toThrow('not found')
+  })
+
+  it('rejects invalid rating', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10')
+    expect(() => updateLog(db, 1, h.id, '2026-06-10', { rating: 6 })).toThrow('rating')
+  })
+})
+
+describe('logHabit — rating', () => {
+  it('stores rating when provided', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    const log = logHabit(db, 1, h.id, '2026-06-10', 'felt great', 5)
+    expect(log.rating).toBe(5)
+  })
+
+  it('stores null rating when not provided', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    const log = logHabit(db, 1, h.id, '2026-06-10')
+    expect(log.rating).toBeNull()
+  })
+
+  it('rejects rating outside 1-5', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    expect(() => logHabit(db, 1, h.id, '2026-06-10', '', 0)).toThrow('rating')
+    expect(() => logHabit(db, 1, h.id, '2026-06-10', '', 6)).toThrow('rating')
+  })
+})
+
+describe('isWeekComplete', () => {
+  it('returns false when no logs this week', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly', target_count: 3 })
+    expect(isWeekComplete(db, h, '2026-06-12')).toBe(false)
+  })
+
+  it('returns false when logged but below target_count', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly', target_count: 3 })
+    logHabit(db, 1, h.id, '2026-06-08')
+    logHabit(db, 1, h.id, '2026-06-10')
+    expect(isWeekComplete(db, h, '2026-06-12')).toBe(false)
+  })
+
+  it('returns true when logs equal target_count', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly', target_count: 3 })
+    logHabit(db, 1, h.id, '2026-06-08')
+    logHabit(db, 1, h.id, '2026-06-10')
+    logHabit(db, 1, h.id, '2026-06-12')
+    expect(isWeekComplete(db, h, '2026-06-12')).toBe(true)
+  })
+
+  it('returns true for target_count=1 with one log this week', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' }) // default target_count=1
+    logHabit(db, 1, h.id, '2026-06-10')
+    expect(isWeekComplete(db, h, '2026-06-12')).toBe(true)
+  })
+
+  it('returns false for daily habits', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-12')
+    expect(isWeekComplete(db, h, '2026-06-12')).toBe(false)
   })
 })
 

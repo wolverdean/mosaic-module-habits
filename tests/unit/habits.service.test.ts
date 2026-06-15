@@ -41,6 +41,16 @@ describe('createHabit', () => {
     expect(h.color).toBe('#ff0000')
     expect(h.emoji).toBe('📚')
   })
+
+  it('defaults target_count to 1', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' })
+    expect(h.target_count).toBe(1)
+  })
+
+  it('stores a custom target_count', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly', target_count: 3 })
+    expect(h.target_count).toBe(3)
+  })
 })
 
 describe('listHabits', () => {
@@ -88,6 +98,12 @@ describe('updateHabit', () => {
 
   it('returns undefined when habit not found', () => {
     expect(updateHabit(db, 1, 999, { name: 'X' })).toBeUndefined()
+  })
+
+  it('updates target_count', () => {
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' })
+    const updated = updateHabit(db, 1, h.id, { target_count: 4 })
+    expect(updated?.target_count).toBe(4)
   })
 })
 

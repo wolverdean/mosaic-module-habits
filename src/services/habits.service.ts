@@ -1,37 +1,40 @@
 import type { Database } from 'better-sqlite3'
 
 export interface Habit {
-  id:          number
-  user_id:     number
-  name:        string
-  frequency:   'daily' | 'weekly'
-  description: string
-  color:       string
-  emoji:       string
-  sort_order:  number
-  active:      number
-  created_at:  string
+  id:           number
+  user_id:      number
+  name:         string
+  frequency:    'daily' | 'weekly'
+  target_count: number
+  description:  string
+  color:        string
+  emoji:        string
+  sort_order:   number
+  active:       number
+  created_at:   string
 }
 
 export interface CreateHabitInput {
-  name:        string
-  frequency?:  'daily' | 'weekly'
-  description?: string
-  color?:      string
-  emoji?:      string
+  name:          string
+  frequency?:    'daily' | 'weekly'
+  target_count?: number
+  description?:  string
+  color?:        string
+  emoji?:        string
 }
 
 export function createHabit(db: Database, userId: number, input: CreateHabitInput): Habit {
   const result = db.prepare(`
-    INSERT INTO habits_habits (user_id, name, frequency, description, color, emoji)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO habits_habits (user_id, name, frequency, target_count, description, color, emoji)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     userId,
     input.name.trim(),
-    input.frequency  ?? 'daily',
-    input.description ?? '',
-    input.color       ?? '#6366f1',
-    input.emoji       ?? '',
+    input.frequency    ?? 'daily',
+    input.target_count ?? 1,
+    input.description  ?? '',
+    input.color        ?? '#6366f1',
+    input.emoji        ?? '',
   )
   return db.prepare('SELECT * FROM habits_habits WHERE id = ?').get(result.lastInsertRowid) as Habit
 }
@@ -55,27 +58,29 @@ export function updateHabit(
   db:     Database,
   userId: number,
   id:     number,
-  input:  Partial<Pick<Habit, 'name' | 'description' | 'color' | 'emoji' | 'active' | 'sort_order'>>,
+  input:  Partial<Pick<Habit, 'name' | 'description' | 'color' | 'emoji' | 'active' | 'sort_order' | 'target_count'>>,
 ): Habit | undefined {
   const habit = getHabit(db, userId, id)
   if (!habit) return undefined
 
   db.prepare(`
     UPDATE habits_habits SET
-      name        = COALESCE(?, name),
-      description = COALESCE(?, description),
-      color       = COALESCE(?, color),
-      emoji       = COALESCE(?, emoji),
-      active      = COALESCE(?, active),
-      sort_order  = COALESCE(?, sort_order)
+      name         = COALESCE(?, name),
+      description  = COALESCE(?, description),
+      color        = COALESCE(?, color),
+      emoji        = COALESCE(?, emoji),
+      active       = COALESCE(?, active),
+      sort_order   = COALESCE(?, sort_order),
+      target_count = COALESCE(?, target_count)
     WHERE id = ? AND user_id = ?
   `).run(
-    input.name        !== undefined ? input.name.trim() : null,
-    input.description !== undefined ? input.description : null,
-    input.color       !== undefined ? input.color       : null,
-    input.emoji       !== undefined ? input.emoji       : null,
-    input.active      !== undefined ? input.active      : null,
-    input.sort_order  !== undefined ? input.sort_order  : null,
+    input.name         !== undefined ? input.name.trim()    : null,
+    input.description  !== undefined ? input.description    : null,
+    input.color        !== undefined ? input.color          : null,
+    input.emoji        !== undefined ? input.emoji          : null,
+    input.active       !== undefined ? input.active         : null,
+    input.sort_order   !== undefined ? input.sort_order     : null,
+    input.target_count !== undefined ? input.target_count   : null,
     id,
     userId,
   )

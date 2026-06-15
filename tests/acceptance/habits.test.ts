@@ -97,12 +97,12 @@ describe('AC2 — log completion', () => {
     expect(res.body.log_date).toBe('2026-06-10')
   })
 
-  it('normalizes weekly habit date to Monday', async () => {
+  it('stores the actual date for weekly habits (no normalization)', async () => {
     const { body: habit } = await request(app).post('/api/habits/habits')
       .send({ name: 'Run', frequency: 'weekly' })
     const res = await request(app).post(`/api/habits/habits/${habit.id}/logs`)
       .send({ date: '2026-06-10' }).expect(201) // Wednesday
-    expect(res.body.log_date).toBe('2026-06-08') // Monday
+    expect(res.body.log_date).toBe('2026-06-10')
   })
 })
 

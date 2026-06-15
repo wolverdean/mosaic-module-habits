@@ -1,8 +1,8 @@
 import type { Database }                              from 'better-sqlite3'
 import type { NotificationItem, CalendarItem, ReportItem, ReportSummary, DetailedReport } from '@mosaic/sdk'
 import type { Habit }                                 from './habits.service.js'
-import { getMondayOf, isLoggedToday }                from './logs.service.js'
-import { getStreak }                                 from './streak.service.js'
+import { getMondayOf, isLoggedToday, isWeekComplete } from './logs.service.js'
+import { getStreak, getLongestStreak, getCompletionRate30d } from './streak.service.js'
 
 function pad(n: number): string { return String(n).padStart(2, '0') }
 
@@ -12,7 +12,7 @@ export function getDueHabits(db: Database, userId: number, date: string): Notifi
   ).all(userId) as Habit[]
 
   return habits
-    .filter(h => !isLoggedToday(db, h, date))
+    .filter(h => h.frequency === 'weekly' ? !isWeekComplete(db, h, date) : !isLoggedToday(db, h, date))
     .map(h => ({
       id:    `habit:${h.id}`,
       title: `${h.emoji ? h.emoji + ' ' : ''}${h.name}`,
@@ -88,10 +88,14 @@ export function getHabitSummary(db: Database, userId: number, today: string): Re
   const avgStreak = habits.length === 0 ? 0
     : Math.round(habits.reduce((sum, h) => sum + getStreak(db, h, today), 0) / habits.length)
 
+  const avgRate30d = habits.length === 0 ? 0
+    : Math.round(habits.reduce((sum, h) => sum + getCompletionRate30d(db, h, today), 0) / habits.length)
+
   return {
     'Active habits':          activeCount,
     'Completions this month': completionsThisMonth,
     'Avg streak':             avgStreak,
+    'Completion rate 30d':    avgRate30d,
   }
 }
 
@@ -121,11 +125,13 @@ export function getDetailedHabitsReport(db: Database, userId: number, start: str
       {
         type:  'table',
         title: 'Per Habit',
-        cols:  ['Habit', 'Completions', 'Streak'],
+        cols:  ['Habit', 'Completions', 'Streak', 'Best streak', 'Rate 30d %'],
         rows:  habits.map(h => [
           `${h.emoji ? h.emoji + ' ' : ''}${h.name}`,
           countMap.get(h.id) ?? 0,
           getStreak(db, h, today),
+          getLongestStreak(db, h),
+          getCompletionRate30d(db, h, today),
         ]),
       },
       {

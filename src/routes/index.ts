@@ -6,8 +6,8 @@ import path                                   from 'node:path'
 import {
   listHabits, getHabit, createHabit, updateHabit, archiveHabit,
 } from '../services/habits.service.js'
-import { logHabit, unlogHabit, getLogs }       from '../services/logs.service.js'
-import { getStreak }                           from '../services/streak.service.js'
+import { logHabit, unlogHabit, getLogs, updateLog, isWeekComplete } from '../services/logs.service.js'
+import { getStreak, getLongestStreak, getCompletionRate30d } from '../services/streak.service.js'
 import { isLoggedToday }                       from '../services/logs.service.js'
 import {
   getHabitsForCalendar, getWeeklyHabits, getHabitSummary,
@@ -56,23 +56,29 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       const habits = listHabits(db(), req.userId, { includeArchived })
       res.json(habits.map(h => ({
         ...h,
-        streak:      getStreak(db(), h, today),
-        loggedToday: isLoggedToday(db(), h, today),
-        todayDate:   today,
+        streak:            getStreak(db(), h, today),
+        longestStreak:     getLongestStreak(db(), h),
+        completionRate30d: getCompletionRate30d(db(), h, today),
+        loggedToday:       isLoggedToday(db(), h, today),
+        weekComplete:      h.frequency === 'weekly' ? isWeekComplete(db(), h, today) : undefined,
+        todayDate:         today,
       })))
     })
   })
 
   router.post('/habits', (req, res) => {
     track('habits.create', () => {
-      const { name, frequency, description, color, emoji } = req.body
+      const { name, frequency, target_count, description, color, emoji } = req.body
       if (!name || !String(name).trim()) {
         res.status(400).json({ error: 'name is required' }); return
       }
       if (frequency && !['daily', 'weekly'].includes(frequency)) {
         res.status(400).json({ error: 'frequency must be daily or weekly' }); return
       }
-      const habit = createHabit(db(), req.userId, { name, frequency, description, color, emoji })
+      if (target_count !== undefined && (!Number.isInteger(target_count) || target_count < 1)) {
+        res.status(400).json({ error: 'target_count must be a positive integer' }); return
+      }
+      const habit = createHabit(db(), req.userId, { name, frequency, target_count, description, color, emoji })
       res.status(201).json(habit)
     })
   })
@@ -87,18 +93,24 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       ).all(habit.id) as { log_date: string }[]
       res.json({
         ...habit,
-        streak:      getStreak(db(), habit, today),
-        loggedToday: isLoggedToday(db(), habit, today),
-        recentLogs:  logs.map(l => l.log_date),
+        streak:            getStreak(db(), habit, today),
+        longestStreak:     getLongestStreak(db(), habit),
+        completionRate30d: getCompletionRate30d(db(), habit, today),
+        loggedToday:       isLoggedToday(db(), habit, today),
+        weekComplete:      habit.frequency === 'weekly' ? isWeekComplete(db(), habit, today) : undefined,
+        recentLogs:        logs.map(l => l.log_date),
       })
     })
   })
 
   router.put('/habits/:id', (req, res) => {
     track('habits.update', () => {
-      const { name, description, color, emoji, active, sort_order } = req.body
+      const { name, description, color, emoji, active, sort_order, target_count } = req.body
+      if (target_count !== undefined && (!Number.isInteger(target_count) || target_count < 1)) {
+        res.status(400).json({ error: 'target_count must be a positive integer' }); return
+      }
       const updated = updateHabit(db(), req.userId, Number(req.params.id), {
-        name, description, color, emoji, active, sort_order,
+        name, description, color, emoji, active, sort_order, target_count,
       })
       if (!updated) { res.status(404).json({ error: 'Not found' }); return }
       res.json(updated)
@@ -129,10 +141,14 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
     track('logs.create', () => {
       const habit = getHabit(db(), req.userId, Number(req.params.id))
       if (!habit) { res.status(404).json({ error: 'Not found' }); return }
-      const date  = (req.body.date as string) || new Date().toISOString().slice(0, 10)
-      const notes = (req.body.notes as string) || ''
+      const date   = (req.body.date as string) || new Date().toISOString().slice(0, 10)
+      const notes  = (req.body.notes as string) || ''
+      const rating = req.body.rating !== undefined ? Number(req.body.rating) : undefined
+      if (rating !== undefined && (!Number.isInteger(rating) || rating < 1 || rating > 5)) {
+        res.status(400).json({ error: 'rating must be an integer between 1 and 5' }); return
+      }
       try {
-        const log = logHabit(db(), req.userId, habit.id, date, notes)
+        const log = logHabit(db(), req.userId, habit.id, date, notes, rating)
         logCounter.add(1, { frequency: habit.frequency })
         res.status(201).json(log)
       } catch (err: any) {
@@ -151,6 +167,29 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       try {
         unlogHabit(db(), req.userId, habit.id, req.params.date)
         res.json({ ok: true })
+      } catch (err: any) {
+        if (err.message?.includes('not found')) {
+          res.status(404).json({ error: err.message }); return
+        }
+        throw err
+      }
+    })
+  })
+
+  router.patch('/habits/:id/logs/:date', (req, res) => {
+    track('logs.update', () => {
+      const habit = getHabit(db(), req.userId, Number(req.params.id))
+      if (!habit) { res.status(404).json({ error: 'Not found' }); return }
+      const { notes, rating } = req.body
+      if (rating !== undefined && rating !== null && (!Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5)) {
+        res.status(400).json({ error: 'rating must be an integer between 1 and 5' }); return
+      }
+      try {
+        const log = updateLog(db(), req.userId, habit.id, req.params.date, {
+          notes,
+          rating: rating !== undefined ? (rating === null ? null : Number(rating)) : undefined,
+        })
+        res.json(log)
       } catch (err: any) {
         if (err.message?.includes('not found')) {
           res.status(404).json({ error: err.message }); return
