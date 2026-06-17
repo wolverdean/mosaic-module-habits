@@ -57,6 +57,26 @@ describe('getStreak — daily', () => {
     logHabit(db, 1, h.id, '2026-06-09')
     expect(getStreak(db, h, '2026-06-12')).toBe(0)
   })
+
+  it('days where count < target_count do not count toward streak', () => {
+    // target=2, only log once on Jun 10 (count=1) — should not count
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily', target_count: 2 })
+    logHabit(db, 1, h.id, '2026-06-10') // count=1, below target
+    logHabit(db, 1, h.id, '2026-06-11') // count=1, below target
+    logHabit(db, 1, h.id, '2026-06-12') // count=1, below target
+    // None meet target=2, so streak=0
+    expect(getStreak(db, h, '2026-06-12')).toBe(0)
+  })
+
+  it('streak counts days where count >= target_count', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily', target_count: 2 })
+    // Log twice on Jun 11 and Jun 12
+    logHabit(db, 1, h.id, '2026-06-11')
+    logHabit(db, 1, h.id, '2026-06-11') // count=2
+    logHabit(db, 1, h.id, '2026-06-12')
+    logHabit(db, 1, h.id, '2026-06-12') // count=2
+    expect(getStreak(db, h, '2026-06-12')).toBe(2)
+  })
 })
 
 describe('getStreak — weekly', () => {
@@ -118,6 +138,15 @@ describe('getLongestStreak — daily', () => {
     logHabit(db, 1, h.id, '2026-06-11')
     logHabit(db, 1, h.id, '2026-06-12')
     expect(getLongestStreak(db, h)).toBe(3)
+  })
+
+  it('same target-count awareness: days below target do not count', () => {
+    // target=2; log once per day — no complete days → longest=0
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily', target_count: 2 })
+    logHabit(db, 1, h.id, '2026-06-10')
+    logHabit(db, 1, h.id, '2026-06-11')
+    logHabit(db, 1, h.id, '2026-06-12')
+    expect(getLongestStreak(db, h)).toBe(0)
   })
 })
 
@@ -210,6 +239,20 @@ describe('getCompletionRate30d', () => {
     logHabit(db, 1, h.id, '2026-06-08') // Mon Jun 8
     logHabit(db, 1, h.id, '2026-06-15') // Mon Jun 15 — outside 30d window from Jun 12
     expect(getCompletionRate30d(db, h, '2026-06-12')).toBe(100)
+  })
+
+  it('partial days count proportionally (count=2, target=4 → 50%)', () => {
+    // target=4, log twice per day for 30 days → each day contributes 2/4 = 50%
+    // achieved = 30 * min(2,4) = 60; denominator = 4 * 30 = 120; rate = 50%
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily', target_count: 4 })
+    for (let i = 0; i < 30; i++) {
+      const d = new Date('2026-06-12T00:00:00Z')
+      d.setUTCDate(d.getUTCDate() - i)
+      const day = d.toISOString().slice(0, 10)
+      logHabit(db, 1, h.id, day)
+      logHabit(db, 1, h.id, day) // count=2
+    }
+    expect(getCompletionRate30d(db, h, '2026-06-12')).toBe(50)
   })
 
   it('excludes pause-period days from denominator', () => {

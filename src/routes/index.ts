@@ -7,12 +7,16 @@ import {
   listHabits, getHabit, createHabit, updateHabit, archiveHabit,
   pauseHabit, resumeHabit,
 } from '../services/habits.service.js'
-import { logHabit, unlogHabit, getLogs, updateLog, isWeekComplete } from '../services/logs.service.js'
+import { logHabit, unlogHabit, getLogs, updateLog, isWeekComplete, getDayLog } from '../services/logs.service.js'
 import { getStreak, getLongestStreak, getCompletionRate30d, buildPauseWindows } from '../services/streak.service.js'
 import { isLoggedToday }                       from '../services/logs.service.js'
 import {
   getHabitsForCalendar, getWeeklyHabits, getHabitSummary, getArchivedHabitStats,
 } from '../services/reports.service.js'
+import {
+  listCategories, getCategoryById, createCategory, updateCategory, deleteCategory,
+} from '../services/categories.service.js'
+import { getLatestWeeklyReview } from '../services/weekly-review.service.js'
 
 // ─── OTel ─────────────────────────────────────────────────────────────────────
 
@@ -51,15 +55,104 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
 
   function db() { return ctxRef.current!.db.raw }
 
+  // ── Categories (must come before /habits/:id to avoid param shadowing) ────
+
+  router.get('/habits/categories', (req, res) => {
+    track('categories.list', () => {
+      res.json(listCategories(db(), req.userId))
+    })
+  })
+
+  router.post('/habits/categories', (req, res) => {
+    track('categories.create', () => {
+      const { name, color } = req.body
+      if (!name || !String(name).trim()) {
+        res.status(400).json({ error: 'name is required' }); return
+      }
+      if (String(name).length > 64) {
+        res.status(400).json({ error: 'name must be 64 characters or fewer' }); return
+      }
+      try {
+        const cat = createCategory(db(), req.userId, String(name).trim(), color)
+        res.status(201).json(cat)
+      } catch (err: any) {
+        if (err?.message?.includes('UNIQUE')) {
+          res.status(409).json({ error: 'A category with that name already exists' }); return
+        }
+        throw err
+      }
+    })
+  })
+
+  router.patch('/habits/categories/:id', (req, res) => {
+    track('categories.update', () => {
+      const id = Number(req.params.id)
+      const { name, color, sort_order } = req.body
+      if (name !== undefined && String(name).length > 64) {
+        res.status(400).json({ error: 'name must be 64 characters or fewer' }); return
+      }
+      try {
+        const updated = updateCategory(db(), req.userId, id, { name, color, sort_order })
+        if (!updated) { res.status(404).json({ error: 'Not found' }); return }
+        res.json(updated)
+      } catch (err: any) {
+        if (err?.message?.includes('UNIQUE')) {
+          res.status(409).json({ error: 'A category with that name already exists' }); return
+        }
+        throw err
+      }
+    })
+  })
+
+  router.delete('/habits/categories/:id', (req, res) => {
+    track('categories.delete', () => {
+      const deleted = deleteCategory(db(), req.userId, Number(req.params.id))
+      if (!deleted) { res.status(404).json({ error: 'Not found' }); return }
+      res.status(204).end()
+    })
+  })
+
+  // ── Reports (must come before /habits/:id to avoid param shadowing) ────────
+
+  router.get('/reports/weekly', (req, res) => {
+    track('reports.weekly', () => {
+      const { start, end } = req.query as { start: string; end: string }
+      if (!start || !end) { res.status(400).json({ error: 'start and end required' }); return }
+      res.json(getWeeklyHabits(db(), req.userId, start, end))
+    })
+  })
+
+  router.get('/reports/summary', (req, res) => {
+    track('reports.summary', () => {
+      const today = new Date().toISOString().slice(0, 10)
+      res.json(getHabitSummary(db(), req.userId, today))
+    })
+  })
+
+  router.get('/reports/weekly-review', (req, res) => {
+    track('reports.weekly-review', () => {
+      const review = getLatestWeeklyReview(db(), req.userId)
+      if (!review) { res.status(404).json({ error: 'No weekly review available yet' }); return }
+      res.json(review)
+    })
+  })
+
   // ── Habits CRUD ────────────────────────────────────────────────────────────
 
   router.get('/habits', (req, res) => {
     track('habits.list', () => {
       const includeArchived = req.query.include_archived === '1'
       const today = new Date().toISOString().slice(0, 10)
-      const habits = listHabits(db(), req.userId, { includeArchived })
+
+      // category_id filter: 'null' string → 'uncategorised', number string → number, absent → undefined
+      const catParam = req.query.category_id as string | undefined
+      const categoryId = catParam === 'null' ? 'uncategorised' as const
+        : catParam ? Number(catParam) : undefined
+
+      const habits = listHabits(db(), req.userId, { includeArchived, categoryId })
       res.json(habits.map(h => {
         const pw = buildPauseWindows(h, today)
+        const dayLog = getDayLog(db(), h, today)
         const base = {
           ...h,
           isPaused:          !!h.paused_since && !h.resumed_at,
@@ -69,6 +162,7 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
           loggedToday:       isLoggedToday(db(), h, today),
           weekComplete:      h.frequency === 'weekly' ? isWeekComplete(db(), h, today) : undefined,
           todayDate:         today,
+          todayCount:        dayLog?.count ?? 0,
         }
         if (h.active === 0) {
           return { ...base, ...getArchivedHabitStats(db(), h) }
@@ -80,7 +174,7 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
 
   router.post('/habits', (req, res) => {
     track('habits.create', () => {
-      const { name, frequency, target_count, description, color, emoji, reminder_time } = req.body
+      const { name, frequency, target_count, description, color, emoji, reminder_time, category_id } = req.body
       if (!name || !String(name).trim()) {
         res.status(400).json({ error: 'name is required' }); return
       }
@@ -93,7 +187,11 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       if (reminder_time !== undefined && reminder_time !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder_time)) {
         res.status(400).json({ error: 'reminder_time must be in HH:MM format' }); return
       }
-      const habit = createHabit(db(), req.userId, { name, frequency, target_count, description, color, emoji, reminder_time })
+      if (category_id !== undefined && category_id !== null) {
+        const cat = getCategoryById(db(), req.userId, category_id)
+        if (!cat) { res.status(400).json({ error: 'invalid category' }); return }
+      }
+      const habit = createHabit(db(), req.userId, { name, frequency, target_count, description, color, emoji, reminder_time, category_id })
       res.status(201).json(habit)
     })
   })
@@ -107,6 +205,7 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
         'SELECT log_date FROM habits_logs WHERE habit_id = ? ORDER BY log_date DESC LIMIT 30'
       ).all(habit.id) as { log_date: string }[]
       const pw = buildPauseWindows(habit, today)
+      const dayLog = getDayLog(db(), habit, today)
       res.json({
         ...habit,
         isPaused:          !!habit.paused_since && !habit.resumed_at,
@@ -115,6 +214,7 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
         completionRate30d: getCompletionRate30d(db(), habit, today, pw),
         loggedToday:       isLoggedToday(db(), habit, today),
         weekComplete:      habit.frequency === 'weekly' ? isWeekComplete(db(), habit, today) : undefined,
+        todayCount:        dayLog?.count ?? 0,
         recentLogs:        logs.map(l => l.log_date),
       })
     })
@@ -122,16 +222,21 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
 
   router.put('/habits/:id', (req, res) => {
     track('habits.update', () => {
-      const { name, description, color, emoji, active, sort_order, target_count, reminder_time } = req.body
+      const { name, description, color, emoji, active, sort_order, target_count, reminder_time, category_id } = req.body
       if (target_count !== undefined && (!Number.isInteger(target_count) || target_count < 1)) {
         res.status(400).json({ error: 'target_count must be a positive integer' }); return
       }
       if (reminder_time !== undefined && reminder_time !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder_time)) {
         res.status(400).json({ error: 'reminder_time must be in HH:MM format' }); return
       }
+      if (category_id !== undefined && category_id !== null) {
+        const cat = getCategoryById(db(), req.userId, category_id)
+        if (!cat) { res.status(400).json({ error: 'invalid category' }); return }
+      }
       const updated = updateHabit(db(), req.userId, Number(req.params.id), {
         name, description, color, emoji, active, sort_order, target_count,
         ...('reminder_time' in req.body ? { reminder_time } : {}),
+        ...('category_id'   in req.body ? { category_id  } : {}),
       })
       if (!updated) { res.status(404).json({ error: 'Not found' }); return }
       res.json(updated)
@@ -176,7 +281,6 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       const updated = resumeHabit(db(), req.userId, id, today)
       if (!updated) { res.status(409).json({ error: 'Habit is not paused' }); return }
       // Normalize API response: paused_since=null signals "not currently paused"
-      // (DB retains paused_since for the pause window; resumed_at marks the window end)
       res.json({ ...updated, isPaused: false, paused_since: null })
     })
   })
@@ -232,16 +336,9 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       if (rating !== undefined && (!Number.isInteger(rating) || rating < 1 || rating > 5)) {
         res.status(400).json({ error: 'rating must be an integer between 1 and 5' }); return
       }
-      try {
-        const log = logHabit(db(), req.userId, habit.id, date, notes, rating)
-        logCounter.add(1, { frequency: habit.frequency })
-        res.status(201).json(log)
-      } catch (err: any) {
-        if (err.message?.includes('already logged')) {
-          res.status(409).json({ error: err.message }); return
-        }
-        throw err
-      }
+      const log = logHabit(db(), req.userId, habit.id, date, notes, rating)
+      logCounter.add(1, { frequency: habit.frequency })
+      res.status(201).json(log)
     })
   })
 
@@ -250,8 +347,8 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       const habit = getHabit(db(), req.userId, Number(req.params.id))
       if (!habit) { res.status(404).json({ error: 'Not found' }); return }
       try {
-        unlogHabit(db(), req.userId, habit.id, req.params.date)
-        res.json({ ok: true })
+        const result = unlogHabit(db(), req.userId, habit.id, req.params.date)
+        res.json({ ok: true, count: result.count })
       } catch (err: any) {
         if (err.message?.includes('not found')) {
           res.status(404).json({ error: err.message }); return
@@ -284,28 +381,13 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
     })
   })
 
-  // ── Calendar & reports ─────────────────────────────────────────────────────
+  // ── Calendar ───────────────────────────────────────────────────────────────
 
   router.get('/calendar', (req, res) => {
     track('calendar', () => {
       const year  = parseInt(req.query.year  as string, 10) || new Date().getFullYear()
       const month = parseInt(req.query.month as string, 10) || (new Date().getMonth() + 1)
       res.json(getHabitsForCalendar(db(), req.userId, year, month))
-    })
-  })
-
-  router.get('/reports/weekly', (req, res) => {
-    track('reports.weekly', () => {
-      const { start, end } = req.query as { start: string; end: string }
-      if (!start || !end) { res.status(400).json({ error: 'start and end required' }); return }
-      res.json(getWeeklyHabits(db(), req.userId, start, end))
-    })
-  })
-
-  router.get('/reports/summary', (req, res) => {
-    track('reports.summary', () => {
-      const today = new Date().toISOString().slice(0, 10)
-      res.json(getHabitSummary(db(), req.userId, today))
     })
   })
 

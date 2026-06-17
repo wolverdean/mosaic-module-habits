@@ -1,37 +1,47 @@
 import type { Database } from 'better-sqlite3'
 
 export interface Habit {
-  id:            number
-  user_id:       number
-  name:          string
-  frequency:     'daily' | 'weekly'
-  target_count:  number
-  description:   string
-  color:         string
-  emoji:         string
-  sort_order:    number
-  active:        number
-  created_at:    string
-  paused_since:  string | null
-  resumed_at:    string | null
-  archived_at:   string | null
-  reminder_time: string | null
+  id:             number
+  user_id:        number
+  name:           string
+  frequency:      'daily' | 'weekly'
+  target_count:   number
+  description:    string
+  color:          string
+  emoji:          string
+  sort_order:     number
+  active:         number
+  created_at:     string
+  paused_since:   string | null
+  resumed_at:     string | null
+  archived_at:    string | null
+  reminder_time:  string | null
+  category_id:    number | null
+  category_name:  string | null
+  category_color: string | null
 }
 
 export interface CreateHabitInput {
-  name:          string
-  frequency?:    'daily' | 'weekly'
-  target_count?: number
-  description?:  string
-  color?:        string
-  emoji?:        string
+  name:           string
+  frequency?:     'daily' | 'weekly'
+  target_count?:  number
+  description?:   string
+  color?:         string
+  emoji?:         string
   reminder_time?: string | null
+  category_id?:   number | null
 }
+
+const HABIT_JOIN = `
+  SELECT h.*, hc.name AS category_name, hc.color AS category_color
+  FROM habits_habits h
+  LEFT JOIN habit_categories hc ON hc.id = h.category_id
+`
 
 export function createHabit(db: Database, userId: number, input: CreateHabitInput): Habit {
   const result = db.prepare(`
-    INSERT INTO habits_habits (user_id, name, frequency, target_count, description, color, emoji, reminder_time)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO habits_habits (user_id, name, frequency, target_count, description, color, emoji, reminder_time, category_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     userId,
     input.name.trim(),
@@ -41,30 +51,45 @@ export function createHabit(db: Database, userId: number, input: CreateHabitInpu
     input.color        ?? '#6366f1',
     input.emoji        ?? '',
     input.reminder_time ?? null,
+    input.category_id   ?? null,
   )
-  return db.prepare('SELECT * FROM habits_habits WHERE id = ?').get(result.lastInsertRowid) as Habit
+  return db.prepare(`${HABIT_JOIN} WHERE h.id = ?`).get(result.lastInsertRowid) as Habit
 }
 
 export function listHabits(
   db:      Database,
   userId:  number,
-  options: { includeArchived?: boolean } = {},
+  options: { includeArchived?: boolean; categoryId?: number | 'uncategorised' } = {},
 ): Habit[] {
-  const sql = options.includeArchived
-    ? 'SELECT * FROM habits_habits WHERE user_id = ? ORDER BY sort_order, id'
-    : 'SELECT * FROM habits_habits WHERE user_id = ? AND active = 1 ORDER BY sort_order, id'
-  return db.prepare(sql).all(userId) as Habit[]
+  const conditions: string[] = ['h.user_id = ?']
+  const params: (string | number)[] = [userId]
+
+  if (!options.includeArchived) {
+    conditions.push('h.active = 1')
+  }
+
+  if (options.categoryId !== undefined) {
+    if (options.categoryId === 'uncategorised') {
+      conditions.push('h.category_id IS NULL')
+    } else {
+      conditions.push('h.category_id = ?')
+      params.push(options.categoryId)
+    }
+  }
+
+  const sql = `${HABIT_JOIN} WHERE ${conditions.join(' AND ')} ORDER BY h.sort_order, h.id`
+  return db.prepare(sql).all(...params) as Habit[]
 }
 
 export function getHabit(db: Database, userId: number, id: number): Habit | undefined {
-  return db.prepare('SELECT * FROM habits_habits WHERE id = ? AND user_id = ?').get(id, userId) as Habit | undefined
+  return db.prepare(`${HABIT_JOIN} WHERE h.id = ? AND h.user_id = ?`).get(id, userId) as Habit | undefined
 }
 
 export function updateHabit(
   db:     Database,
   userId: number,
   id:     number,
-  input:  Partial<Pick<Habit, 'name' | 'description' | 'color' | 'emoji' | 'active' | 'sort_order' | 'target_count' | 'paused_since' | 'reminder_time'>>,
+  input:  Partial<Pick<Habit, 'name' | 'description' | 'color' | 'emoji' | 'active' | 'sort_order' | 'target_count' | 'paused_since' | 'reminder_time' | 'category_id'>>,
 ): Habit | undefined {
   const habit = getHabit(db, userId, id)
   if (!habit) return undefined
@@ -100,6 +125,10 @@ export function updateHabit(
   if ('reminder_time' in input) {
     db.prepare('UPDATE habits_habits SET reminder_time = ? WHERE id = ? AND user_id = ?')
       .run(input.reminder_time ?? null, id, userId)
+  }
+  if ('category_id' in input) {
+    db.prepare('UPDATE habits_habits SET category_id = ? WHERE id = ? AND user_id = ?')
+      .run(input.category_id ?? null, id, userId)
   }
 
   return getHabit(db, userId, id)

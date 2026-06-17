@@ -100,9 +100,12 @@ export function getHabitSummary(db: Database, userId: number, today: string): Re
 }
 
 export function getDetailedHabitsReport(db: Database, userId: number, start: string, end: string, today: string): DetailedReport {
-  const habits = db.prepare(
-    'SELECT * FROM habits_habits WHERE user_id = ? AND active = 1 ORDER BY sort_order ASC'
-  ).all(userId) as Habit[]
+  const habits = db.prepare(`
+    SELECT h.*, hc.name AS category_name, hc.color AS category_color
+    FROM habits_habits h
+    LEFT JOIN habit_categories hc ON hc.id = h.category_id
+    WHERE h.user_id = ? AND h.active = 1 ORDER BY h.sort_order ASC
+  `).all(userId) as Habit[]
 
   const completionCounts = db.prepare(`
     SELECT habit_id, COUNT(*) AS count
@@ -152,7 +155,7 @@ export interface ArchivedHabitStats {
   archived_at:       string | null
 }
 
-export function getArchivedHabitStats(db: Database, habit: Habit): ArchivedHabitStats {
+export function getArchivedHabitStats(db: Database, habit: Habit, _userId?: number): ArchivedHabitStats {
   const asOf = habit.archived_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10)
 
   const totalCompletions = (db.prepare(

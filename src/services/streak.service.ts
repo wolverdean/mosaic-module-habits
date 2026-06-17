@@ -8,6 +8,10 @@ function addDays(dateStr: string, n: number): string {
   return d.toISOString().slice(0, 10)
 }
 
+export function effectiveTarget(t: number | null | undefined): number {
+  return Math.max(1, t ?? 1)
+}
+
 export interface PauseWindow { from: string; to: string }
 
 export function buildPauseWindows(habit: { paused_since: string | null; resumed_at?: string | null }, today: string): PauseWindow[] {
@@ -28,22 +32,28 @@ function pauseWindowCeiling(cursor: string, pauseWindows: PauseWindow[]): string
   return null
 }
 
-function dailyStreak(db: Database, habitId: number, today: string, pauseWindows: PauseWindow[] = [], pausedSince?: string | null): number {
-  // Fetch all log dates for this habit, ordered desc
+function dailyStreak(db: Database, habit: Habit, today: string, pauseWindows: PauseWindow[] = [], pausedSince?: string | null): number {
+  const target = effectiveTarget(habit.target_count)
+
+  // Fetch all log dates + counts for this habit, ordered desc
   const rows = db.prepare(
-    'SELECT log_date FROM habits_logs WHERE habit_id = ? ORDER BY log_date DESC'
-  ).all(habitId) as { log_date: string }[]
+    'SELECT log_date, COALESCE(count, 1) as count FROM habits_logs WHERE habit_id = ? ORDER BY log_date DESC'
+  ).all(habit.id) as { log_date: string; count: number }[]
 
   if (rows.length === 0) return 0
+
+  // Filter to only days where count meets target
+  const completeDays = rows.filter(r => r.count >= target)
+  if (completeDays.length === 0) return 0
 
   // If the habit is currently paused, start from the day before paused_since
   const startDate = pausedSince ? addDays(pausedSince, -1) : today
 
   // Start from startDate; if not logged, try from the day before
-  let cursor = rows[0].log_date === startDate ? startDate : addDays(startDate, -1)
-  if (rows[0].log_date !== cursor) return 0  // most recent log is older than yesterday (relative to startDate)
+  let cursor = completeDays[0].log_date === startDate ? startDate : addDays(startDate, -1)
+  if (completeDays[0].log_date !== cursor) return 0  // most recent complete log is older than yesterday (relative to startDate)
 
-  const dateSet = new Set(rows.map(r => r.log_date))
+  const dateSet = new Set(completeDays.map(r => r.log_date))
   let count = 0
   while (dateSet.has(cursor)) {
     count++
@@ -59,16 +69,16 @@ function dailyStreak(db: Database, habitId: number, today: string, pauseWindows:
 
 function weeklyStreak(db: Database, habit: Habit, today: string, pauseWindows: PauseWindow[] = []): number {
   const rows = db.prepare(
-    'SELECT log_date FROM habits_logs WHERE habit_id = ? ORDER BY log_date DESC'
-  ).all(habit.id) as { log_date: string }[]
+    'SELECT log_date, COALESCE(count, 1) as count FROM habits_logs WHERE habit_id = ? ORDER BY log_date DESC'
+  ).all(habit.id) as { log_date: string; count: number }[]
 
   if (rows.length === 0) return 0
 
-  // Group logs by week (Monday)
+  // Group logs by week (Monday), summing count per week
   const weekCounts = new Map<string, number>()
   for (const row of rows) {
     const monday = getMondayOf(row.log_date)
-    weekCounts.set(monday, (weekCounts.get(monday) ?? 0) + 1)
+    weekCounts.set(monday, (weekCounts.get(monday) ?? 0) + row.count)
   }
 
   const target   = habit.target_count ?? 1
@@ -100,23 +110,24 @@ function weeklyStreak(db: Database, habit: Habit, today: string, pauseWindows: P
 export function getStreak(db: Database, habit: Habit, today: string, pauseWindows: PauseWindow[] = []): number {
   return habit.frequency === 'weekly'
     ? weeklyStreak(db, habit, today, pauseWindows)
-    : dailyStreak(db, habit.id, today, pauseWindows, habit.paused_since)
+    : dailyStreak(db, habit, today, pauseWindows, habit.paused_since)
 }
 
 export function getLongestStreak(db: Database, habit: Habit): number {
-  const rows = db.prepare(
-    'SELECT log_date FROM habits_logs WHERE habit_id = ? ORDER BY log_date ASC'
-  ).all(habit.id) as { log_date: string }[]
-
-  if (rows.length === 0) return 0
+  const target = effectiveTarget(habit.target_count)
 
   if (habit.frequency === 'weekly') {
+    const rows = db.prepare(
+      'SELECT log_date, COALESCE(count, 1) as count FROM habits_logs WHERE habit_id = ? ORDER BY log_date ASC'
+    ).all(habit.id) as { log_date: string; count: number }[]
+
+    if (rows.length === 0) return 0
+
     const weekCounts = new Map<string, number>()
     for (const row of rows) {
       const monday = getMondayOf(row.log_date)
-      weekCounts.set(monday, (weekCounts.get(monday) ?? 0) + 1)
+      weekCounts.set(monday, (weekCounts.get(monday) ?? 0) + row.count)
     }
-    const target = habit.target_count ?? 1
     const completeWeeks = Array.from(weekCounts.entries())
       .filter(([, count]) => count >= target)
       .map(([monday]) => monday)
@@ -135,9 +146,19 @@ export function getLongestStreak(db: Database, habit: Habit): number {
     return longest
   }
 
+  // Daily — filter by count >= target
+  const rows = db.prepare(
+    'SELECT log_date, COALESCE(count, 1) as count FROM habits_logs WHERE habit_id = ? ORDER BY log_date ASC'
+  ).all(habit.id) as { log_date: string; count: number }[]
+
+  if (rows.length === 0) return 0
+
+  const completeDays = rows.filter(r => r.count >= target).map(r => r.log_date)
+  if (completeDays.length === 0) return 0
+
   let longest = 1, current = 1
-  for (let i = 1; i < rows.length; i++) {
-    if (addDays(rows[i - 1].log_date, 1) === rows[i].log_date) {
+  for (let i = 1; i < completeDays.length; i++) {
+    if (addDays(completeDays[i - 1], 1) === completeDays[i]) {
       current++
       if (current > longest) longest = current
     } else {
@@ -149,27 +170,35 @@ export function getLongestStreak(db: Database, habit: Habit): number {
 
 export function getCompletionRate30d(db: Database, habit: Habit, today: string, pauseWindows: PauseWindow[] = []): number {
   const from = addDays(today, -29)
-  const actual = (db.prepare(
-    'SELECT COUNT(*) AS n FROM habits_logs WHERE habit_id = ? AND log_date >= ? AND log_date <= ?'
-  ).get(habit.id, from, today) as { n: number }).n
 
   if (habit.frequency === 'daily') {
+    const rows = db.prepare(
+      `SELECT COALESCE(count, 1) as count FROM habits_logs
+       WHERE habit_id = ? AND user_id = ? AND log_date >= ? AND log_date <= ?`
+    ).all(habit.id, habit.user_id, from, today) as { count: number }[]
+
+    const target = effectiveTarget(habit.target_count)
+    const achieved = rows.reduce((sum, r) => sum + Math.min(r.count, target), 0)
+
     // Count pause days that overlap the 30-day window
     let pauseDays = 0
     for (const w of pauseWindows) {
       const wFrom = w.from < from ? from : w.from
       const wTo   = w.to   > today ? today : w.to
       if (wFrom <= wTo) {
-        // Count days in [wFrom, wTo] inclusive
         const ms = new Date(`${wTo}T00:00:00Z`).getTime() - new Date(`${wFrom}T00:00:00Z`).getTime()
         pauseDays += Math.floor(ms / 86400000) + 1
       }
     }
-    const expected = Math.max(1, 30 - pauseDays)
-    return Math.min(100, Math.round((actual / expected) * 100))
+    const activeDays = Math.max(1, 30 - pauseDays)
+    const denominator = target * activeDays
+    return Math.min(100, Math.round((achieved / denominator) * 100))
   }
 
   // Weekly: proportionally adjust for pause windows
+  const actual = (db.prepare(
+    'SELECT COALESCE(SUM(count), 0) AS n FROM habits_logs WHERE habit_id = ? AND log_date >= ? AND log_date <= ?'
+  ).get(habit.id, from, today) as { n: number }).n
   const expected = 4 * (habit.target_count ?? 1)
   return Math.min(100, Math.round((actual / expected) * 100))
 }

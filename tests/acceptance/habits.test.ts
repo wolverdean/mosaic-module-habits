@@ -116,10 +116,11 @@ describe('AC3 — unlog completion', () => {
     expect(res.body).toHaveLength(0)
   })
 
-  it('returns 409 on duplicate log', async () => {
+  it('AC3 — duplicate log increments count', async () => {
     const { body: habit } = await request(app).post('/api/habits/habits').send({ name: 'Walk' })
-    await request(app).post(`/api/habits/habits/${habit.id}/logs`).send({ date: '2026-06-10' })
-    await request(app).post(`/api/habits/habits/${habit.id}/logs`).send({ date: '2026-06-10' }).expect(409)
+    await request(app).post(`/api/habits/habits/${habit.id}/logs`).send({ date: '2026-06-10' }).expect(201)
+    const res = await request(app).post(`/api/habits/habits/${habit.id}/logs`).send({ date: '2026-06-10' }).expect(201)
+    expect(res.body.count).toBe(2)
   })
 })
 

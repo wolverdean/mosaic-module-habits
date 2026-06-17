@@ -10,6 +10,7 @@ import {
   isLoggedToday,
   isWeekComplete,
   getMondayOf,
+  getDayLog,
 } from '../../src/services/logs.service.js'
 
 function makeDb(): Database.Database {
@@ -42,17 +43,19 @@ describe('getMondayOf', () => {
   })
 })
 
-describe('logHabit — daily', () => {
-  it('logs a daily habit for a given date', () => {
+describe('logHabit — upsert / count semantics', () => {
+  it('creates row with count=1 on first call', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     const log = logHabit(db, 1, h.id, '2026-06-10')
+    expect(log.count).toBe(1)
     expect(log.log_date).toBe('2026-06-10')
   })
 
-  it('throws 409 on duplicate log for same date', () => {
+  it('increments count to 2 on second call same date', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     logHabit(db, 1, h.id, '2026-06-10')
-    expect(() => logHabit(db, 1, h.id, '2026-06-10')).toThrow('already logged')
+    const log = logHabit(db, 1, h.id, '2026-06-10')
+    expect(log.count).toBe(2)
   })
 
   it('allows logging different dates', () => {
@@ -78,10 +81,11 @@ describe('logHabit — weekly', () => {
     expect(getLogs(db, 1, h.id, '2026-06')).toHaveLength(3)
   })
 
-  it('throws 409 on duplicate log for the same day', () => {
+  it('increments count when logging same day twice', () => {
     const h = createHabit(db, 1, { name: 'Long run', frequency: 'weekly' })
     logHabit(db, 1, h.id, '2026-06-10')
-    expect(() => logHabit(db, 1, h.id, '2026-06-10')).toThrow('already logged')
+    const second = logHabit(db, 1, h.id, '2026-06-10')
+    expect(second.count).toBe(2)
   })
 
   it('allows logging different weeks', () => {
@@ -92,24 +96,80 @@ describe('logHabit — weekly', () => {
   })
 })
 
-describe('unlogHabit', () => {
-  it('removes an existing log', () => {
+describe('unlogHabit — decrement / delete semantics', () => {
+  it('decrements count; row survives at count=1 after two logs, one unlog', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     logHabit(db, 1, h.id, '2026-06-10')
-    unlogHabit(db, 1, h.id, '2026-06-10')
+    logHabit(db, 1, h.id, '2026-06-10') // count=2
+    const result = unlogHabit(db, 1, h.id, '2026-06-10')
+    expect(result.count).toBe(1)
+    // Row still exists
+    expect(getLogs(db, 1, h.id, '2026-06')).toHaveLength(1)
+  })
+
+  it('deletes row when count reaches 0', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10') // count=1
+    const result = unlogHabit(db, 1, h.id, '2026-06-10')
+    expect(result.count).toBe(0)
     expect(getLogs(db, 1, h.id, '2026-06')).toHaveLength(0)
   })
 
-  it('throws 404 when no log exists', () => {
+  it('throws when no log exists', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     expect(() => unlogHabit(db, 1, h.id, '2026-06-10')).toThrow('not found')
   })
 
   it('removes a weekly log by its actual date', () => {
     const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' })
-    logHabit(db, 1, h.id, '2026-06-10')             // stored as actual date
+    logHabit(db, 1, h.id, '2026-06-10')
     unlogHabit(db, 1, h.id, '2026-06-10')
     expect(getLogs(db, 1, h.id, '2026-06')).toHaveLength(0)
+  })
+})
+
+describe('getDayLog', () => {
+  it('returns null when no row', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    expect(getDayLog(db, h, '2026-06-10')).toBeNull()
+  })
+
+  it('returns {id, count} when row exists', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10')
+    const row = getDayLog(db, h, '2026-06-10')
+    expect(row).not.toBeNull()
+    expect(row!.count).toBe(1)
+    expect(typeof row!.id).toBe('number')
+  })
+})
+
+describe('isLoggedToday — target_count awareness', () => {
+  it('returns false when count < target_count', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily', target_count: 3 })
+    logHabit(db, 1, h.id, '2026-06-10')
+    logHabit(db, 1, h.id, '2026-06-10') // count=2
+    expect(isLoggedToday(db, h, '2026-06-10')).toBe(false)
+  })
+
+  it('returns true when count >= target_count', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily', target_count: 2 })
+    logHabit(db, 1, h.id, '2026-06-10')
+    logHabit(db, 1, h.id, '2026-06-10') // count=2
+    expect(isLoggedToday(db, h, '2026-06-10')).toBe(true)
+  })
+
+  it('returns false when no log for today', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    const today = new Date().toISOString().slice(0, 10)
+    expect(isLoggedToday(db, h, today)).toBe(false)
+  })
+
+  it('returns true after logging today (target_count=1)', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    const today = new Date().toISOString().slice(0, 10)
+    logHabit(db, 1, h.id, today)
+    expect(isLoggedToday(db, h, today)).toBe(true)
   })
 })
 
@@ -163,7 +223,7 @@ describe('logHabit — rating', () => {
   it('rejects rating outside 1-5', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     expect(() => logHabit(db, 1, h.id, '2026-06-10', '', 0)).toThrow('rating')
-    expect(() => logHabit(db, 1, h.id, '2026-06-10', '', 6)).toThrow('rating')
+    expect(() => logHabit(db, 1, h.id, '2026-06-11', '', 6)).toThrow('rating')
   })
 })
 
@@ -198,20 +258,5 @@ describe('isWeekComplete', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     logHabit(db, 1, h.id, '2026-06-12')
     expect(isWeekComplete(db, h, '2026-06-12')).toBe(false)
-  })
-})
-
-describe('isLoggedToday', () => {
-  it('returns false when no log for today', () => {
-    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
-    const today = new Date().toISOString().slice(0, 10)
-    expect(isLoggedToday(db, h, today)).toBe(false)
-  })
-
-  it('returns true after logging today', () => {
-    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
-    const today = new Date().toISOString().slice(0, 10)
-    logHabit(db, 1, h.id, today)
-    expect(isLoggedToday(db, h, today)).toBe(true)
   })
 })
