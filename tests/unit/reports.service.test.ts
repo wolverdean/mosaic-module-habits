@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { migrate } from '../../src/migrate.js'
-import { createHabit } from '../../src/services/habits.service.js'
+import { createHabit, archiveHabit, pauseHabit } from '../../src/services/habits.service.js'
 import { logHabit } from '../../src/services/logs.service.js'
 import {
   getDueHabits,
   getHabitsForCalendar,
   getWeeklyHabits,
   getHabitSummary,
+  getArchivedHabitStats,
 } from '../../src/services/reports.service.js'
-import { archiveHabit } from '../../src/services/habits.service.js'
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:')
@@ -51,6 +51,17 @@ describe('getDueHabits', () => {
   it('excludes archived habits', () => {
     const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
     archiveHabit(db, 1, h.id)
+    expect(getDueHabits(db, 1, '2026-06-12')).toHaveLength(0)
+  })
+
+  it('excludes paused habits', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    pauseHabit(db, 1, h.id, '2026-06-12')
+    expect(getDueHabits(db, 1, '2026-06-12')).toHaveLength(0)
+  })
+
+  it('excludes habits with reminder_time set', () => {
+    createHabit(db, 1, { name: 'Walk', frequency: 'daily', reminder_time: '07:00' })
     expect(getDueHabits(db, 1, '2026-06-12')).toHaveLength(0)
   })
 })
@@ -98,5 +109,34 @@ describe('getHabitSummary', () => {
     expect(summary['Active habits']).toBe(2)
     expect(summary['Completions this month']).toBeGreaterThanOrEqual(1)
     expect('Avg streak' in summary).toBe(true)
+  })
+})
+
+describe('getArchivedHabitStats', () => {
+  it('returns correct totalCompletions', () => {
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-10')
+    logHabit(db, 1, h.id, '2026-06-11')
+    logHabit(db, 1, h.id, '2026-06-12')
+    archiveHabit(db, 1, h.id)
+    const archived = db.prepare('SELECT * FROM habits_habits WHERE id = ?').get(h.id) as any
+    const stats = getArchivedHabitStats(db, archived)
+    expect(stats.totalCompletions).toBe(3)
+  })
+
+  it('returns null archived_at for pre-feature archives (archived_at is null) and still computes stats', () => {
+    // Simulate a habit archived before the archived_at column existed (null value)
+    const h = createHabit(db, 1, { name: 'Old', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-05-01')
+    // Force archived_at to NULL (simulating pre-feature archive)
+    db.prepare('UPDATE habits_habits SET active = 0, archived_at = NULL WHERE id = ?').run(h.id)
+    const archived = db.prepare('SELECT * FROM habits_habits WHERE id = ?').get(h.id) as any
+    const stats = getArchivedHabitStats(db, archived)
+    expect(stats.archived_at).toBeNull()
+    expect(stats.totalCompletions).toBe(1)
+    expect(stats.longestStreak).toBe(1)
+    // completionRate30d should be a number (0–100)
+    expect(stats.completionRate30d).toBeGreaterThanOrEqual(0)
+    expect(stats.completionRate30d).toBeLessThanOrEqual(100)
   })
 })

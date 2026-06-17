@@ -5,21 +5,25 @@ import fs                                     from 'node:fs'
 import path                                   from 'node:path'
 import {
   listHabits, getHabit, createHabit, updateHabit, archiveHabit,
+  pauseHabit, resumeHabit,
 } from '../services/habits.service.js'
 import { logHabit, unlogHabit, getLogs, updateLog, isWeekComplete } from '../services/logs.service.js'
-import { getStreak, getLongestStreak, getCompletionRate30d } from '../services/streak.service.js'
+import { getStreak, getLongestStreak, getCompletionRate30d, buildPauseWindows } from '../services/streak.service.js'
 import { isLoggedToday }                       from '../services/logs.service.js'
 import {
-  getHabitsForCalendar, getWeeklyHabits, getHabitSummary,
+  getHabitsForCalendar, getWeeklyHabits, getHabitSummary, getArchivedHabitStats,
 } from '../services/reports.service.js'
 
 // ─── OTel ─────────────────────────────────────────────────────────────────────
 
-const tracer      = trace.getTracer('habits')
-const meter       = metrics.getMeter('habits')
-const reqCounter  = meter.createCounter('habits.requests_total',    { description: 'Habit route requests' })
-const reqDuration = meter.createHistogram('habits.request_duration_ms', { unit: 'ms' })
-const logCounter  = meter.createCounter('habits.logs_total',        { description: 'Habit completions logged' })
+const tracer        = trace.getTracer('habits')
+const meter         = metrics.getMeter('habits')
+const reqCounter    = meter.createCounter('habits.requests_total',    { description: 'Habit route requests' })
+const reqDuration   = meter.createHistogram('habits.request_duration_ms', { unit: 'ms' })
+const logCounter    = meter.createCounter('habits.logs_total',        { description: 'Habit completions logged' })
+const remindersSent = meter.createCounter('habits.reminders_sent_total', {
+  description: 'Per-habit reminder push notifications sent',
+})
 
 function track(op: string, fn: () => void): void {
   const t0 = Date.now()
@@ -54,21 +58,29 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       const includeArchived = req.query.include_archived === '1'
       const today = new Date().toISOString().slice(0, 10)
       const habits = listHabits(db(), req.userId, { includeArchived })
-      res.json(habits.map(h => ({
-        ...h,
-        streak:            getStreak(db(), h, today),
-        longestStreak:     getLongestStreak(db(), h),
-        completionRate30d: getCompletionRate30d(db(), h, today),
-        loggedToday:       isLoggedToday(db(), h, today),
-        weekComplete:      h.frequency === 'weekly' ? isWeekComplete(db(), h, today) : undefined,
-        todayDate:         today,
-      })))
+      res.json(habits.map(h => {
+        const pw = buildPauseWindows(h, today)
+        const base = {
+          ...h,
+          isPaused:          !!h.paused_since && !h.resumed_at,
+          streak:            getStreak(db(), h, today, pw),
+          longestStreak:     getLongestStreak(db(), h),
+          completionRate30d: getCompletionRate30d(db(), h, today, pw),
+          loggedToday:       isLoggedToday(db(), h, today),
+          weekComplete:      h.frequency === 'weekly' ? isWeekComplete(db(), h, today) : undefined,
+          todayDate:         today,
+        }
+        if (h.active === 0) {
+          return { ...base, ...getArchivedHabitStats(db(), h) }
+        }
+        return base
+      }))
     })
   })
 
   router.post('/habits', (req, res) => {
     track('habits.create', () => {
-      const { name, frequency, target_count, description, color, emoji } = req.body
+      const { name, frequency, target_count, description, color, emoji, reminder_time } = req.body
       if (!name || !String(name).trim()) {
         res.status(400).json({ error: 'name is required' }); return
       }
@@ -78,7 +90,10 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       if (target_count !== undefined && (!Number.isInteger(target_count) || target_count < 1)) {
         res.status(400).json({ error: 'target_count must be a positive integer' }); return
       }
-      const habit = createHabit(db(), req.userId, { name, frequency, target_count, description, color, emoji })
+      if (reminder_time !== undefined && reminder_time !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder_time)) {
+        res.status(400).json({ error: 'reminder_time must be in HH:MM format' }); return
+      }
+      const habit = createHabit(db(), req.userId, { name, frequency, target_count, description, color, emoji, reminder_time })
       res.status(201).json(habit)
     })
   })
@@ -91,11 +106,13 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       const logs  = db().prepare(
         'SELECT log_date FROM habits_logs WHERE habit_id = ? ORDER BY log_date DESC LIMIT 30'
       ).all(habit.id) as { log_date: string }[]
+      const pw = buildPauseWindows(habit, today)
       res.json({
         ...habit,
-        streak:            getStreak(db(), habit, today),
+        isPaused:          !!habit.paused_since && !habit.resumed_at,
+        streak:            getStreak(db(), habit, today, pw),
         longestStreak:     getLongestStreak(db(), habit),
-        completionRate30d: getCompletionRate30d(db(), habit, today),
+        completionRate30d: getCompletionRate30d(db(), habit, today, pw),
         loggedToday:       isLoggedToday(db(), habit, today),
         weekComplete:      habit.frequency === 'weekly' ? isWeekComplete(db(), habit, today) : undefined,
         recentLogs:        logs.map(l => l.log_date),
@@ -105,12 +122,16 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
 
   router.put('/habits/:id', (req, res) => {
     track('habits.update', () => {
-      const { name, description, color, emoji, active, sort_order, target_count } = req.body
+      const { name, description, color, emoji, active, sort_order, target_count, reminder_time } = req.body
       if (target_count !== undefined && (!Number.isInteger(target_count) || target_count < 1)) {
         res.status(400).json({ error: 'target_count must be a positive integer' }); return
       }
+      if (reminder_time !== undefined && reminder_time !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(reminder_time)) {
+        res.status(400).json({ error: 'reminder_time must be in HH:MM format' }); return
+      }
       const updated = updateHabit(db(), req.userId, Number(req.params.id), {
         name, description, color, emoji, active, sort_order, target_count,
+        ...('reminder_time' in req.body ? { reminder_time } : {}),
       })
       if (!updated) { res.status(404).json({ error: 'Not found' }); return }
       res.json(updated)
@@ -123,6 +144,70 @@ export function createRouter(ctxRef: { current: ModuleContext | null }): Router 
       if (!habit) { res.status(404).json({ error: 'Not found' }); return }
       archiveHabit(db(), req.userId, Number(req.params.id))
       res.json({ ok: true })
+    })
+  })
+
+  // ── Pause / Resume / Test-reminder ─────────────────────────────────────────
+
+  router.post('/habits/:id/pause', (req, res) => {
+    track('habits.pause', () => {
+      const id    = Number(req.params.id)
+      const habit = getHabit(db(), req.userId, id)
+      if (!habit) { res.status(404).json({ error: 'Not found' }); return }
+      if (habit.paused_since !== null && habit.resumed_at === null) {
+        res.status(409).json({ error: 'Habit is already paused' }); return
+      }
+      const today   = new Date().toISOString().slice(0, 10)
+      const updated = pauseHabit(db(), req.userId, id, today)
+      if (!updated) { res.status(409).json({ error: 'Habit is already paused' }); return }
+      res.json(updated)
+    })
+  })
+
+  router.post('/habits/:id/resume', (req, res) => {
+    track('habits.resume', () => {
+      const id    = Number(req.params.id)
+      const habit = getHabit(db(), req.userId, id)
+      if (!habit) { res.status(404).json({ error: 'Not found' }); return }
+      if (habit.paused_since === null || habit.resumed_at !== null) {
+        res.status(409).json({ error: 'Habit is not paused' }); return
+      }
+      const today   = new Date().toISOString().slice(0, 10)
+      const updated = resumeHabit(db(), req.userId, id, today)
+      if (!updated) { res.status(409).json({ error: 'Habit is not paused' }); return }
+      // Normalize API response: paused_since=null signals "not currently paused"
+      // (DB retains paused_since for the pause window; resumed_at marks the window end)
+      res.json({ ...updated, isPaused: false, paused_since: null })
+    })
+  })
+
+  router.post('/habits/:id/test-reminder', async (req, res) => {
+    const id    = Number(req.params.id)
+    const habit = getHabit(db(), req.userId, id)
+    if (!habit) { res.status(404).json({ error: 'Not found' }); return }
+    if (!habit.reminder_time) { res.status(400).json({ error: 'No reminder time configured' }); return }
+
+    await tracer.startActiveSpan('habits.test_reminder', async span => {
+      const t0 = Date.now()
+      try {
+        await ctxRef.current!.notify.push(req.userId, {
+          title: `${habit.emoji ? habit.emoji + ' ' : ''}${habit.name}`,
+          body:  'Test reminder: Time to log your habit',
+          url:   '/habits',
+        })
+        remindersSent.add(1, { type: 'test' })
+        reqCounter.add(1, { op: 'habits.test_reminder', status: 'ok' })
+        span.setStatus({ code: SpanStatusCode.OK })
+        res.json({ ok: true })
+      } catch (err) {
+        reqCounter.add(1, { op: 'habits.test_reminder', status: 'error' })
+        span.setStatus({ code: SpanStatusCode.ERROR })
+        span.recordException(err as Error)
+        res.status(500).json({ error: 'Failed to send notification' })
+      } finally {
+        reqDuration.record(Date.now() - t0, { op: 'habits.test_reminder' })
+        span.end()
+      }
     })
   })
 

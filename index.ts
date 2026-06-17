@@ -8,6 +8,8 @@ import { reportHooks }       from './src/hooks/reports.js'
 import {
   getHabitsForCalendar,
 } from './src/services/reports.service.js'
+import type { Habit } from './src/services/habits.service.js'
+import { isLoggedToday, isWeekComplete } from './src/services/logs.service.js'
 
 const meter   = metrics.getMeter('habits')
 const jobRuns = meter.createCounter('habits.jobs.runs_total')
@@ -34,7 +36,7 @@ export default defineModule({
         const today = new Date().toISOString().slice(0, 10)
         const n = (ctx.db.raw.prepare(`
           SELECT COUNT(*) AS n FROM habits_habits
-          WHERE user_id = ? AND active = 1
+          WHERE user_id = ? AND active = 1 AND (paused_since IS NULL OR resumed_at IS NOT NULL)
             AND id NOT IN (
               SELECT habit_id FROM habits_logs
               WHERE user_id = ? AND log_date = ?
@@ -57,6 +59,57 @@ export default defineModule({
   async onInit(ctx: ModuleContext) {
     ctxRef.current = ctx
     ctx.logger.info('Habits module initialised')
+
+    ctx.scheduler.add({
+      name:     'habit-reminders',
+      schedule: '* * * * *',
+      fn: async (_jobCtx: ModuleContext) => {
+        const t0  = Date.now()
+        jobRuns.add(1, { job: 'habit-reminders' })
+
+        const now         = new Date()
+        const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+        const today       = now.toISOString().slice(0, 10)
+        const db          = ctx.db.raw
+
+        const habits = db.prepare(`
+          SELECT * FROM habits_habits
+          WHERE active = 1 AND (paused_since IS NULL OR resumed_at IS NOT NULL) AND reminder_time = ?
+        `).all(currentTime) as Habit[]
+
+        let sent = 0
+        for (const habit of habits) {
+          // Skip if already done today
+          if (isLoggedToday(db, habit, today)) continue
+          if (habit.frequency === 'weekly' && isWeekComplete(db, habit, today)) continue
+
+          // Dedup: use notification_state dismissed_date to record we sent today
+          const dedupItemId = `habit-reminder:${habit.id}:${today}`
+          const already = db.prepare(
+            `SELECT user_id FROM notification_state
+             WHERE user_id = ? AND module_slug = 'habits' AND item_id = ? AND dismissed_date = ?`
+          ).get(habit.user_id, dedupItemId, today)
+          if (already) continue
+
+          await ctx.notify.push(habit.user_id, {
+            title: `${habit.emoji ? habit.emoji + ' ' : ''}${habit.name}`,
+            body:  'Time to log your habit',
+            url:   '/habits',
+          })
+
+          db.prepare(
+            `INSERT OR IGNORE INTO notification_state (user_id, module_slug, item_id, dismissed_date)
+             VALUES (?, 'habits', ?, ?)`
+          ).run(habit.user_id, dedupItemId, today)
+
+          sent++
+        }
+
+        const dur = Date.now() - t0
+        jobDur.record(dur, { job: 'habit-reminders' })
+        ctx.logger.info('habit-reminders job ran', { currentTime, checked: habits.length, sent })
+      },
+    })
   },
 
   async health(ctx: ModuleContext) {

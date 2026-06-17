@@ -211,4 +211,66 @@ describe('getCompletionRate30d', () => {
     logHabit(db, 1, h.id, '2026-06-15') // Mon Jun 15 — outside 30d window from Jun 12
     expect(getCompletionRate30d(db, h, '2026-06-12')).toBe(100)
   })
+
+  it('excludes pause-period days from denominator', () => {
+    // 30-day window: May 14 – Jun 12. Pause 5 days: Jun 1–5 → denominator = 25.
+    // Log 25 days (all non-paused days) → expect 100%
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    const pauseWindows = [{ from: '2026-06-01', to: '2026-06-05' }]
+    // Log every day in window except paused period
+    const allDays: string[] = []
+    for (let i = 0; i < 30; i++) {
+      const d = new Date('2026-06-12T00:00:00Z')
+      d.setUTCDate(d.getUTCDate() - i)
+      allDays.push(d.toISOString().slice(0, 10))
+    }
+    for (const day of allDays) {
+      if (day < '2026-06-01' || day > '2026-06-05') {
+        logHabit(db, 1, h.id, day)
+      }
+    }
+    // 25 logs, denominator = 25 → 100%
+    expect(getCompletionRate30d(db, h, '2026-06-12', pauseWindows)).toBe(100)
+  })
+})
+
+describe('dailyStreak — with pause windows', () => {
+  it('skips a pause window in the middle of a streak without breaking it', () => {
+    // Streak: Jun 6, 7, 8 — then pause Jun 9–10 — then Jun 11, 12
+    // Expected streak = 5 (pause window skipped, not counted)
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    logHabit(db, 1, h.id, '2026-06-06')
+    logHabit(db, 1, h.id, '2026-06-07')
+    logHabit(db, 1, h.id, '2026-06-08')
+    logHabit(db, 1, h.id, '2026-06-11')
+    logHabit(db, 1, h.id, '2026-06-12')
+    const pauseWindows = [{ from: '2026-06-09', to: '2026-06-10' }]
+    expect(getStreak(db, h, '2026-06-12', pauseWindows)).toBe(5)
+  })
+
+  it('starts from day before paused_since when habit is currently paused', () => {
+    // Habit paused on Jun 11. Streak should be computed from Jun 10.
+    // Logs: Jun 8, 9, 10 — streak = 3
+    const h = createHabit(db, 1, { name: 'Walk', frequency: 'daily' })
+    // Manually set paused_since
+    db.prepare("UPDATE habits_habits SET paused_since = '2026-06-11' WHERE id = ?").run(h.id)
+    const paused = db.prepare('SELECT * FROM habits_habits WHERE id = ?').get(h.id) as any
+    logHabit(db, 1, h.id, '2026-06-08')
+    logHabit(db, 1, h.id, '2026-06-09')
+    logHabit(db, 1, h.id, '2026-06-10')
+    expect(getStreak(db, paused, '2026-06-12')).toBe(3)
+  })
+})
+
+describe('weeklyStreak — with pause windows', () => {
+  it('skips a fully-paused week and counts streak across two un-paused weeks as 2', () => {
+    // Week of May 25: paused entirely. Logs in week of May 18 and Jun 1 — streak = 2
+    const h = createHabit(db, 1, { name: 'Run', frequency: 'weekly' })
+    logHabit(db, 1, h.id, '2026-05-18') // week of May 18
+    logHabit(db, 1, h.id, '2026-06-01') // week of Jun 1
+    // week of May 25 entirely paused
+    const pauseWindows = [{ from: '2026-05-25', to: '2026-05-31' }]
+    // today is Jun 7 — the week of Jun 1 is last week
+    expect(getStreak(db, h, '2026-06-07', pauseWindows)).toBe(2)
+  })
 })

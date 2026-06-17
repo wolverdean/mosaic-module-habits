@@ -2,13 +2,13 @@ import type { Database }                              from 'better-sqlite3'
 import type { NotificationItem, CalendarItem, ReportItem, ReportSummary, DetailedReport } from '@mosaic/sdk'
 import type { Habit }                                 from './habits.service.js'
 import { getMondayOf, isLoggedToday, isWeekComplete } from './logs.service.js'
-import { getStreak, getLongestStreak, getCompletionRate30d } from './streak.service.js'
+import { getStreak, getLongestStreak, getCompletionRate30d, buildPauseWindows } from './streak.service.js'
 
 function pad(n: number): string { return String(n).padStart(2, '0') }
 
 export function getDueHabits(db: Database, userId: number, date: string): NotificationItem[] {
   const habits = db.prepare(
-    'SELECT * FROM habits_habits WHERE user_id = ? AND active = 1'
+    'SELECT * FROM habits_habits WHERE user_id = ? AND active = 1 AND (paused_since IS NULL OR resumed_at IS NOT NULL) AND reminder_time IS NULL'
   ).all(userId) as Habit[]
 
   return habits
@@ -86,10 +86,10 @@ export function getHabitSummary(db: Database, userId: number, today: string): Re
   ).all(userId) as Habit[]
 
   const avgStreak = habits.length === 0 ? 0
-    : Math.round(habits.reduce((sum, h) => sum + getStreak(db, h, today), 0) / habits.length)
+    : Math.round(habits.reduce((sum, h) => sum + getStreak(db, h, today, buildPauseWindows(h, today)), 0) / habits.length)
 
   const avgRate30d = habits.length === 0 ? 0
-    : Math.round(habits.reduce((sum, h) => sum + getCompletionRate30d(db, h, today), 0) / habits.length)
+    : Math.round(habits.reduce((sum, h) => sum + getCompletionRate30d(db, h, today, buildPauseWindows(h, today)), 0) / habits.length)
 
   return {
     'Active habits':          activeCount,
@@ -129,9 +129,9 @@ export function getDetailedHabitsReport(db: Database, userId: number, start: str
         rows:  habits.map(h => [
           `${h.emoji ? h.emoji + ' ' : ''}${h.name}`,
           countMap.get(h.id) ?? 0,
-          getStreak(db, h, today),
+          getStreak(db, h, today, buildPauseWindows(h, today)),
           getLongestStreak(db, h),
-          getCompletionRate30d(db, h, today),
+          getCompletionRate30d(db, h, today, buildPauseWindows(h, today)),
         ]),
       },
       {
@@ -140,5 +140,29 @@ export function getDetailedHabitsReport(db: Database, userId: number, start: str
         items: getWeeklyHabits(db, userId, start, end),
       },
     ],
+  }
+}
+
+// ─── Archived habit stats ─────────────────────────────────────────────────────
+
+export interface ArchivedHabitStats {
+  longestStreak:     number
+  completionRate30d: number
+  totalCompletions:  number
+  archived_at:       string | null
+}
+
+export function getArchivedHabitStats(db: Database, habit: Habit): ArchivedHabitStats {
+  const asOf = habit.archived_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10)
+
+  const totalCompletions = (db.prepare(
+    'SELECT COUNT(*) AS count FROM habits_logs WHERE habit_id = ?'
+  ).get(habit.id) as { count: number }).count
+
+  return {
+    longestStreak:     getLongestStreak(db, habit),
+    completionRate30d: getCompletionRate30d(db, habit, asOf),
+    totalCompletions,
+    archived_at:       habit.archived_at ?? null,
   }
 }

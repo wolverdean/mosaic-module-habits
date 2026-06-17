@@ -7,6 +7,8 @@ import {
   createHabit,
   updateHabit,
   archiveHabit,
+  pauseHabit,
+  resumeHabit,
 } from '../../src/services/habits.service.js'
 
 function makeDb(): Database.Database {
@@ -118,5 +120,112 @@ describe('archiveHabit', () => {
     const h = createHabit(db, 1, { name: 'Mine' })
     archiveHabit(db, 2, h.id)
     expect(getHabit(db, 1, h.id)?.active).toBe(1)
+  })
+
+  it('writes a non-null archived_at timestamp', () => {
+    const h = createHabit(db, 1, { name: 'Done' })
+    archiveHabit(db, 1, h.id)
+    const archived = getHabit(db, 1, h.id)
+    expect(archived?.archived_at).not.toBeNull()
+    expect(typeof archived?.archived_at).toBe('string')
+  })
+})
+
+describe('pauseHabit', () => {
+  it('sets paused_since and leaves active = 1', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    const paused = pauseHabit(db, 1, h.id, '2026-06-12')
+    expect(paused).toBeDefined()
+    expect(paused?.paused_since).toBe('2026-06-12')
+    expect(paused?.active).toBe(1)
+  })
+
+  it('returns undefined for an already-paused (not yet resumed) habit', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    pauseHabit(db, 1, h.id, '2026-06-12')
+    const result = pauseHabit(db, 1, h.id, '2026-06-13')
+    expect(result).toBeUndefined()
+  })
+
+  it('returns undefined for a habit owned by another user', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    expect(pauseHabit(db, 2, h.id, '2026-06-12')).toBeUndefined()
+  })
+})
+
+describe('resumeHabit', () => {
+  it('sets resumed_at and leaves paused_since intact (isPaused becomes false)', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    pauseHabit(db, 1, h.id, '2026-06-12')
+    const resumed = resumeHabit(db, 1, h.id, '2026-06-15')
+    expect(resumed).toBeDefined()
+    // paused_since preserved — pause window is now [paused_since, resumed_at]
+    expect(resumed?.paused_since).toBe('2026-06-12')
+    expect(resumed?.resumed_at).toBe('2026-06-15')
+    // isPaused = paused_since IS NOT NULL AND resumed_at IS NULL → false now
+    const isPaused = !!resumed?.paused_since && !resumed?.resumed_at
+    expect(isPaused).toBe(false)
+  })
+
+  it('returns undefined for a habit that is not paused', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    expect(resumeHabit(db, 1, h.id, '2026-06-15')).toBeUndefined()
+  })
+
+  it('returns undefined for a habit that is already resumed', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    pauseHabit(db, 1, h.id, '2026-06-12')
+    resumeHabit(db, 1, h.id, '2026-06-15')
+    // Second resume call should return undefined
+    expect(resumeHabit(db, 1, h.id, '2026-06-16')).toBeUndefined()
+  })
+
+  it('allows re-pausing after a resume', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    pauseHabit(db, 1, h.id, '2026-06-12')
+    resumeHabit(db, 1, h.id, '2026-06-15')
+    // Re-pausing should work and reset the window
+    const repaused = pauseHabit(db, 1, h.id, '2026-06-20')
+    expect(repaused).toBeDefined()
+    expect(repaused?.paused_since).toBe('2026-06-20')
+    expect(repaused?.resumed_at).toBeNull()
+  })
+})
+
+describe('archiveHabit — clears pause state', () => {
+  it('sets paused_since and resumed_at to NULL when archiving a paused habit', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    pauseHabit(db, 1, h.id, '2026-06-12')
+    archiveHabit(db, 1, h.id)
+    const archived = getHabit(db, 1, h.id)
+    expect(archived?.active).toBe(0)
+    expect(archived?.paused_since).toBeNull()
+    expect(archived?.resumed_at).toBeNull()
+  })
+})
+
+describe('createHabit — reminder_time', () => {
+  it('stores reminder_time when provided', () => {
+    const h = createHabit(db, 1, { name: 'Walk', reminder_time: '07:30' })
+    expect(h.reminder_time).toBe('07:30')
+  })
+
+  it('stores null reminder_time when not provided', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    expect(h.reminder_time).toBeNull()
+  })
+})
+
+describe('updateHabit — reminder_time', () => {
+  it('can set reminder_time', () => {
+    const h = createHabit(db, 1, { name: 'Walk' })
+    const updated = updateHabit(db, 1, h.id, { reminder_time: '08:00' })
+    expect(updated?.reminder_time).toBe('08:00')
+  })
+
+  it('can clear reminder_time to null', () => {
+    const h = createHabit(db, 1, { name: 'Walk', reminder_time: '08:00' })
+    const updated = updateHabit(db, 1, h.id, { reminder_time: null })
+    expect(updated?.reminder_time).toBeNull()
   })
 })

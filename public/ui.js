@@ -61,22 +61,26 @@
 
     const cards = habits.map(h => {
       const done = h.frequency === 'weekly' ? h.weekComplete : h.loggedToday
+      const toggleBtn = h.isPaused
+        ? `<div style="width:2.2rem;height:2.2rem;border-radius:50%;border:2px solid #475569;background:#475569;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:#94a3b8">⏸</div>`
+        : `<button class="h-toggle" data-id="${h.id}" style="
+            width:2.2rem;height:2.2rem;border-radius:50%;border:2px solid ${esc(h.color)};
+            background:${done ? esc(h.color) : 'transparent'};
+            color:#fff;font-size:1rem;cursor:pointer;flex-shrink:0;
+            display:flex;align-items:center;justify-content:center">
+            ${done ? '✓' : (h.emoji || '')}
+          </button>`
       return `
       <div class="h-card" data-id="${h.id}" style="
         display:flex;align-items:center;gap:.75rem;padding:.9rem 1rem;
         background:#1e293b;border-radius:8px;margin-bottom:.5rem;cursor:pointer">
-        <button class="h-toggle" data-id="${h.id}" style="
-          width:2.2rem;height:2.2rem;border-radius:50%;border:2px solid ${esc(h.color)};
-          background:${done ? esc(h.color) : 'transparent'};
-          color:#fff;font-size:1rem;cursor:pointer;flex-shrink:0;
-          display:flex;align-items:center;justify-content:center">
-          ${done ? '✓' : (h.emoji || '')}
-        </button>
+        ${toggleBtn}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
             ${esc(h.name)}
           </div>
           <div style="font-size:.75rem;color:#64748b">${freqLabel(h)}</div>
+          ${h.isPaused ? `<span style="display:inline-block;background:#78350f;color:#fbbf24;font-size:.7rem;padding:1px 6px;border-radius:10px;margin-top:2px">Paused</span>` : ''}
         </div>
         <div style="text-align:right;flex-shrink:0">
           <div style="font-size:.85rem;color:#f59e0b;font-weight:600">${streakLabel(h.streak)}</div>
@@ -168,6 +172,15 @@
     for (let i = 0; i < firstDay; i++) cells.push('<div></div>')
     for (let d = 1; d <= daysInMonth; d++) {
       const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+      // Paused days: neutral style, not interactive
+      const isPausedDay = habit.paused_since && dateStr >= habit.paused_since && dateStr <= today
+      if (isPausedDay) {
+        cells.push(`<div style="
+          width:2rem;height:2rem;border-radius:50%;line-height:2rem;text-align:center;
+          font-size:.75rem;position:relative;
+          background:#334155;color:#64748b;border:none">${d}</div>`)
+        continue
+      }
       const log = logMap[dateStr]
       const done = !!log
       // Rating shading: 1-2=50%, 3=75%, 4-5=100% opacity
@@ -199,7 +212,7 @@
       <button id="h-back" style="background:none;border:none;color:#6366f1;cursor:pointer;padding:0;margin-bottom:1rem">← Back</button>
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.75rem">
         <div>
-          <h2 style="margin:0;color:#f1f5f9">${esc(habit.emoji)} ${esc(habit.name)}</h2>
+          <h2 style="margin:0;color:#f1f5f9">${esc(habit.emoji)} ${esc(habit.name)}${habit.isPaused || habit.paused_since ? ` <span style="display:inline-block;background:#78350f;color:#fbbf24;font-size:.7rem;padding:1px 6px;border-radius:10px;vertical-align:middle">Paused</span>` : ''}</h2>
           <div style="color:#64748b;font-size:.85rem">${freqLabel(habit)}</div>
         </div>
         <button id="h-edit" style="padding:.35rem .8rem;background:#334155;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Edit</button>
@@ -219,10 +232,15 @@
       </div>
 
       <div style="display:flex;gap:.5rem;margin-bottom:1rem">
-        <button id="h-log-today" style="padding:.5rem 1.2rem;background:${esc(habit.color)};color:#fff;border:none;border-radius:6px;cursor:pointer">
-          ${habit.loggedToday ? 'Unlog today' : 'Log today'}
-        </button>
+        ${habit.isPaused || habit.paused_since
+          ? `<button disabled style="padding:.5rem 1.2rem;background:${esc(habit.color)};color:#fff;border:none;border-radius:6px;cursor:not-allowed;opacity:0.4">${habit.loggedToday ? 'Unlog today' : 'Log today'}</button>`
+          : `<button id="h-log-today" style="padding:.5rem 1.2rem;background:${esc(habit.color)};color:#fff;border:none;border-radius:6px;cursor:pointer">${habit.loggedToday ? 'Unlog today' : 'Log today'}</button>`}
         <button id="h-archive" style="padding:.5rem 1rem;background:#334155;color:#ef4444;border:none;border-radius:6px;cursor:pointer">Archive</button>
+      </div>
+      <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+        ${habit.isPaused || habit.paused_since
+          ? `<button id="h-resume-btn" style="padding:.5rem 1rem;background:#334155;color:#10b981;border:none;border-radius:6px;cursor:pointer">&#9654; Resume</button>`
+          : `<button id="h-pause-btn" style="padding:.5rem 1rem;background:#334155;color:#fbbf24;border:none;border-radius:6px;cursor:pointer">&#9208; Pause</button>`}
       </div>
 
       <div id="h-log-panel" style="display:none;background:#1e293b;border-radius:8px;padding:1rem;margin-bottom:1rem">
@@ -316,12 +334,35 @@
       view = 'list'; renderList()
     }
 
-    container.querySelector('#h-log-today').onclick = () => {
-      if (habit.loggedToday) {
-        // unlog immediately
-        api.delete(`/habits/${id}/logs/${today}`).then(() => { refreshHabits(); showDetail(id) }).catch(e => alert(e.message))
-      } else {
-        openPanel(today, null)
+    const logTodayBtn = container.querySelector('#h-log-today')
+    if (logTodayBtn) {
+      logTodayBtn.onclick = () => {
+        if (habit.loggedToday) {
+          // unlog immediately
+          api.delete(`/habits/${id}/logs/${today}`).then(() => { refreshHabits(); showDetail(id) }).catch(e => alert(e.message))
+        } else {
+          openPanel(today, null)
+        }
+      }
+    }
+
+    const pauseBtn = container.querySelector('#h-pause-btn')
+    if (pauseBtn) {
+      pauseBtn.onclick = async () => {
+        try {
+          await api.post(`/habits/${id}/pause`, {})
+          showDetail(id)
+        } catch (err) { alert(err.message || 'Error pausing habit') }
+      }
+    }
+
+    const resumeBtn = container.querySelector('#h-resume-btn')
+    if (resumeBtn) {
+      resumeBtn.onclick = async () => {
+        try {
+          await api.post(`/habits/${id}/resume`, {})
+          showDetail(id)
+        } catch (err) { alert(err.message || 'Error resuming habit') }
       }
     }
   }
@@ -359,6 +400,15 @@
             style="display:block;width:5rem;margin-top:.25rem;padding:.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#f1f5f9">
         </label>
       </div>
+      <div style="margin-bottom:1rem">
+        <label style="display:block;font-size:.8rem;color:#94a3b8;margin-bottom:.25rem">Daily reminder (optional)</label>
+        <input type="time" id="h-reminder" value="${esc(habit?.reminder_time ?? '')}"
+          style="background:#0f172a;color:#f1f5f9;border:1px solid #334155;border-radius:6px;padding:.5rem .75rem;width:100%;box-sizing:border-box">
+      </div>
+      ${habit && habit.reminder_time ? `
+        <button id="h-test-reminder" type="button" style="margin-bottom:1rem;padding:.4rem .9rem;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:6px;cursor:pointer;font-size:.85rem">
+          Send test notification
+        </button>` : ''}
       <label style="display:block;margin-bottom:1rem">
         <span style="color:#94a3b8;font-size:.85rem">Description</span>
         <textarea id="h-desc" style="display:block;width:100%;margin-top:.25rem;padding:.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#f1f5f9;box-sizing:border-box;resize:vertical;min-height:4rem">${esc(habit?.description || '')}</textarea>
@@ -398,6 +448,7 @@
       const name   = container.querySelector('#h-name').value.trim()
       const emoji  = container.querySelector('#h-emoji').value
       const desc   = container.querySelector('#h-desc').value
+      const reminder_time = container.querySelector('#h-reminder')?.value || null
       const freq   = isEdit ? habit.frequency
         : container.querySelector('input[name="freq"]:checked')?.value || 'daily'
       const targetEl = container.querySelector('#h-target')
@@ -409,14 +460,34 @@
       }
       try {
         if (isEdit) {
-          await api.put(`/habits/${habit.id}`, { name, emoji, description: desc, color: selectedColor, target_count })
+          await api.put(`/habits/${habit.id}`, { name, emoji, description: desc, color: selectedColor, target_count, reminder_time })
         } else {
-          await api.post('/habits', { name, emoji, description: desc, color: selectedColor, frequency: freq, target_count })
+          await api.post('/habits', { name, emoji, description: desc, color: selectedColor, frequency: freq, target_count, reminder_time })
         }
         await refreshHabits()
         view = 'list'; renderList()
       } catch (err) {
         alert(err.message || 'Error saving habit')
+      }
+    }
+
+    const testReminderBtn = container.querySelector('#h-test-reminder')
+    if (testReminderBtn) {
+      testReminderBtn.onclick = async () => {
+        try {
+          await api.post(`/habits/${habit.id}/test-reminder`, {})
+          const toast = document.createElement('span')
+          toast.textContent = 'Test notification sent!'
+          toast.style.cssText = 'margin-left:.75rem;font-size:.85rem;color:#10b981'
+          testReminderBtn.insertAdjacentElement('afterend', toast)
+          setTimeout(() => toast.remove(), 3000)
+        } catch (err) {
+          const toast = document.createElement('span')
+          toast.textContent = `Failed: ${err.message || 'Error'}`
+          toast.style.cssText = 'margin-left:.75rem;font-size:.85rem;color:#ef4444'
+          testReminderBtn.insertAdjacentElement('afterend', toast)
+          setTimeout(() => toast.remove(), 3000)
+        }
       }
     }
   }
@@ -429,9 +500,17 @@
       <h2 style="margin:0 0 1rem;color:#f1f5f9">Archived Habits</h2>
       ${archived.length === 0 ? '<p style="color:#64748b">No archived habits.</p>' :
         archived.map(h => `
-          <div style="display:flex;align-items:center;gap:.75rem;padding:.75rem;background:#1e293b;border-radius:8px;margin-bottom:.5rem">
-            <span style="flex:1;color:#94a3b8">${esc(h.emoji)} ${esc(h.name)}</span>
-            <button class="h-restore" data-id="${h.id}" style="padding:.3rem .7rem;background:#334155;color:#10b981;border:none;border-radius:6px;cursor:pointer;font-size:.8rem">Restore</button>
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:.9rem 1rem;background:#1e293b;border-radius:8px;margin-bottom:.5rem">
+            <div>
+              <div style="font-weight:600;color:#f1f5f9">${h.emoji ? esc(h.emoji) + ' ' : ''}${esc(h.name)}</div>
+              <div style="font-size:.75rem;color:#64748b;margin-top:.25rem">
+                ${h.archived_at ? 'Archived ' + new Date(h.archived_at).toLocaleDateString() : 'Archive date unknown'}
+              </div>
+              <div style="font-size:.8rem;color:#94a3b8;margin-top:.4rem">
+                &#11088; ${h.longestStreak ?? 0} best &nbsp;&middot;&nbsp; ${h.completionRate30d ?? 0}% (30d) &nbsp;&middot;&nbsp; ${h.totalCompletions ?? 0} total
+              </div>
+            </div>
+            <button class="h-restore" data-id="${h.id}" style="padding:.4rem .9rem;background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:6px;cursor:pointer;font-size:.85rem;flex-shrink:0">Restore</button>
           </div>`).join('')}`
 
     container.querySelector('#h-back').onclick = () => { view = 'list'; renderList() }
