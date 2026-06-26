@@ -2,3 +2,8 @@ node_modules/
 dist/
 *.db
 .env
+
+# Feature Factory (managed externally — install via feature-factory repo)
+.claude/agents/
+.claude/hooks/
+.claude/skills/
