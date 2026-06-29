@@ -35,7 +35,7 @@ export interface CreateHabitInput {
 const HABIT_JOIN = `
   SELECT h.*, hc.name AS category_name, hc.color AS category_color
   FROM habits_habits h
-  LEFT JOIN habit_categories hc ON hc.id = h.category_id
+  LEFT JOIN habits_categories hc ON hc.id = h.category_id
 `
 
 export function createHabit(db: Database, userId: number, input: CreateHabitInput): Habit {

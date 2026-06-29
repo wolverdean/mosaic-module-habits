@@ -103,7 +103,7 @@ export function getDetailedHabitsReport(db: Database, userId: number, start: str
   const habits = db.prepare(`
     SELECT h.*, hc.name AS category_name, hc.color AS category_color
     FROM habits_habits h
-    LEFT JOIN habit_categories hc ON hc.id = h.category_id
+    LEFT JOIN habits_categories hc ON hc.id = h.category_id
     WHERE h.user_id = ? AND h.active = 1 ORDER BY h.sort_order ASC
   `).all(userId) as Habit[]
 

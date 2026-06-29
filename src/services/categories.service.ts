@@ -12,13 +12,13 @@ export interface HabitCategory {
 
 export function listCategories(db: Database, userId: number): HabitCategory[] {
   return db.prepare(
-    'SELECT * FROM habit_categories WHERE user_id = ? ORDER BY sort_order ASC, id ASC'
+    'SELECT * FROM habits_categories WHERE user_id = ? ORDER BY sort_order ASC, id ASC'
   ).all(userId) as HabitCategory[]
 }
 
 export function getCategoryById(db: Database, userId: number, id: number): HabitCategory | null {
   const row = db.prepare(
-    'SELECT * FROM habit_categories WHERE id = ? AND user_id = ?'
+    'SELECT * FROM habits_categories WHERE id = ? AND user_id = ?'
   ).get(id, userId) as HabitCategory | undefined
   return row ?? null
 }
@@ -31,7 +31,7 @@ export function createCategory(
 ): HabitCategory {
   // RETURNING * requires SQLite 3.35+; better-sqlite3 supports it
   const row = db.prepare(`
-    INSERT INTO habit_categories (user_id, name, color)
+    INSERT INTO habits_categories (user_id, name, color)
     VALUES (?, ?, ?)
     RETURNING *
   `).get(userId, name, color ?? null) as HabitCategory
@@ -68,7 +68,7 @@ export function updateCategory(
   params.push(id, userId)
 
   db.prepare(
-    `UPDATE habit_categories SET ${setClauses.join(', ')} WHERE id = ? AND user_id = ?`
+    `UPDATE habits_categories SET ${setClauses.join(', ')} WHERE id = ? AND user_id = ?`
   ).run(...params)
 
   return getCategoryById(db, userId, id) ?? undefined
@@ -76,7 +76,7 @@ export function updateCategory(
 
 export function deleteCategory(db: Database, userId: number, id: number): boolean {
   const result = db.prepare(
-    'DELETE FROM habit_categories WHERE id = ? AND user_id = ?'
+    'DELETE FROM habits_categories WHERE id = ? AND user_id = ?'
   ).run(id, userId)
   return result.changes > 0
 }

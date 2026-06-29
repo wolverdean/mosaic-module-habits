@@ -67,11 +67,11 @@ export function migrate(db: ModuleDb): void {
   // Inline migration — add category_id column to habits_habits
   const habitCols3 = (db.prepare('PRAGMA table_info(habits_habits)').all() as { name: string }[]).map(r => r.name)
   if (!habitCols3.includes('category_id')) {
-    db.exec('ALTER TABLE habits_habits ADD COLUMN category_id INTEGER REFERENCES habit_categories(id) ON DELETE SET NULL')
+    db.exec('ALTER TABLE habits_habits ADD COLUMN category_id INTEGER REFERENCES habits_categories(id) ON DELETE SET NULL')
   }
 
   db.exec(`
-    CREATE TABLE IF NOT EXISTS habit_categories (
+    CREATE TABLE IF NOT EXISTS habits_categories (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name       TEXT    NOT NULL CHECK(length(name) <= 64),
@@ -97,5 +97,5 @@ export function migrate(db: ModuleDb): void {
 
   db.exec(`CREATE INDEX IF NOT EXISTS habits_logs_user_date     ON habits_logs(user_id, log_date)`)
   db.exec(`CREATE INDEX IF NOT EXISTS habits_habits_user        ON habits_habits(user_id, active)`)
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_habit_categories_user ON habit_categories(user_id, sort_order)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_habit_categories_user ON habits_categories(user_id, sort_order)`)
 }
